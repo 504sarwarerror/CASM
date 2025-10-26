@@ -125,18 +125,27 @@ class CodeGenerator:
             jm = jump_map[op.type]
         except KeyError:
             raise SyntaxError(f"Line {op.line}: Unsupported comparison operator '{op.value}' in if-statement")
+        
+        # FIXED: Jump to label_next when condition is FALSE
         self.output.append(f"    {jm} {label_next}")
+        
+        # Generate the TRUE block (this will include the "jmp error" from your code)
         self.generate_block([TokenType.ELIF, TokenType.ELSE, TokenType.ENDIF])
+        
+        # FIXED: Only jump to end if there are elif/else blocks coming
+        has_elif_or_else = self.current_token() and self.current_token().type in [TokenType.ELIF, TokenType.ELSE]
+        if has_elif_or_else:
+            self.output.append(f"    jmp {label_end}")
+        
+        # Place label_next (where we jump when condition is FALSE)
+        self.output.append(f"{label_next}:")
         
         has_else = False
         while self.current_token() and self.current_token().type in [TokenType.ELIF, TokenType.ELSE]:
             if self.current_token().type == TokenType.ELIF:
-                self.output.append(f"    jmp {label_end}")
-                self.output.append(f"{label_next}:")
                 label_next = self.get_label()
                 
                 self.advance()
-                # ELIF expects the same pattern as IF
                 var_token = self.current_token()
                 if not var_token or var_token.type not in [TokenType.IDENTIFIER, TokenType.REGISTER]:
                     raise SyntaxError(f"Line {var_token.line if var_token else '?'}: Expected identifier or register after 'elif'")
@@ -152,6 +161,7 @@ class CodeGenerator:
                 value = value_token.value
                 self.advance()
                 self.skip_newlines()
+                
                 var_m = self.remap_reg(var)
                 self.output.append(f"    cmp {var_m}, {value}")
                 try:
@@ -159,20 +169,21 @@ class CodeGenerator:
                 except KeyError:
                     raise SyntaxError(f"Line {op.line}: Unsupported comparison operator '{op.value}' in elif-statement")
                 self.output.append(f"    {jm2} {label_next}")
-                self.generate_block([TokenType.ELIF, TokenType.ELSE, TokenType.ENDIF])
                 
-            elif self.current_token().type == TokenType.ELSE:
+                self.generate_block([TokenType.ELIF, TokenType.ELSE, TokenType.ENDIF])
                 self.output.append(f"    jmp {label_end}")
                 self.output.append(f"{label_next}:")
+                
+            elif self.current_token().type == TokenType.ELSE:
                 has_else = True
                 self.advance()
                 self.skip_newlines()
                 self.generate_block([TokenType.ENDIF])
                 break
         
-        if not has_else:
-            self.output.append(f"{label_next}:")
-        self.output.append(f"{label_end}:")
+        # Only place end label if we had elif/else
+        if has_elif_or_else:
+            self.output.append(f"{label_end}:")
 
         # mark end line and emit end marker
         end_line = self.current_token().line if self.current_token() else start_line
@@ -180,7 +191,7 @@ class CodeGenerator:
 
         if self.current_token() and self.current_token().type == TokenType.ENDIF:
             self.advance()
-    
+
     def generate_for(self):
         start_line = self.current_token().line if self.current_token() else -1
         block_id = self.block_counter
@@ -407,7 +418,7 @@ class CodeGenerator:
             elif token.type == TokenType.CONTINUE:
                 self.generate_continue()
             elif token.type == TokenType.ASM_LINE:
-                # See note above: skip raw ASM lines from the generated snippet.
+                self.output.append(token.value)
                 self.advance()
             elif token.type == TokenType.NEWLINE:
                 self.advance()
