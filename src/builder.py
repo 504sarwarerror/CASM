@@ -1,13 +1,16 @@
 import subprocess
 import shutil
 import os
+import shlex
 
 
 class Builder:
-    def __init__(self, compiled_file, verbose=False, target='windows'):
+    def __init__(self, compiled_file, verbose=False, target='windows', linker_flags=''):
         self.compiled_file = compiled_file
         self.verbose = verbose
         self.target = target  # 'windows', 'linux', 'macos'
+        # linker_flags is a single string (e.g. "-L/path -lSDL2 -lSDL2main -mwindows")
+        self.linker_flags = linker_flags or ''
     
     def log(self, message):
         if self.verbose:
@@ -101,6 +104,14 @@ class Builder:
             else:
                 print(f"[!] Unsupported target: {self.target}")
                 return False
+
+            # If user provided extra linker flags, split them safely and append
+            if self.linker_flags:
+                try:
+                    extra = shlex.split(self.linker_flags)
+                except Exception:
+                    extra = self.linker_flags.split()
+                link_cmd.extend(extra)
 
             self.log(f"[*] Running linker: {' '.join(link_cmd)}")
             result = subprocess.run(link_cmd, capture_output=True, text=True)

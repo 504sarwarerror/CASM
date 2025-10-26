@@ -225,39 +225,54 @@ class Compiler:
         output.append("; ========================================")
         output.append("; Code Section")
         output.append("; ========================================")
-        output.append("section .text")
-        output.append("    global main")
-        output.append("")
-        
-        # Standard library functions
+
+        # If the user-supplied code already contains its own section/global/main
+        # directives we should not inject another `section .text` or `main:` wrapper
+        user_has_own_sections = False
+        if isinstance(code_lines, str):
+            lower = code_lines.lower()
+            if 'section .text' in lower or '\nsection .text' in lower or 'global main' in lower or '\nmain:' in lower:
+                user_has_own_sections = True
+
+        if not user_has_own_sections:
+            output.append("section .text")
+            output.append("    global main")
+            output.append("")
+
+        # Standard library functions (always place them before user code so symbols are defined)
         if deps['code']:
             output.append("; ========================================")
             output.append("; Standard Library Functions")
             output.append("; ========================================")
             output.append(deps['code'])
             output.append("")
-        
-        # Main function
-        output.append("; ========================================")
-        output.append("; Main Program")
-        output.append("; ========================================")
-        output.append("main:")
-        
-        if stdlib_used:
-            output.append("    ; Initialize standard library")
-            output.append("    sub rsp, 40")
-            output.append("    call _init_stdio")
-            output.append("    add rsp, 40")
+
+        # If we injected our own `main:` wrapper, do so and optionally initialize stdlib
+        if not user_has_own_sections:
+            output.append("; ========================================")
+            output.append("; Main Program")
+            output.append("; ========================================")
+            output.append("main:")
+
+            # Only call _init_stdio if we actually emitted stdlib code (so the symbol exists)
+            if deps['code'] and ('_init_stdio' in deps['code'] or '_init_stdio' in deps.get('bss', [])):
+                output.append("    ; Initialize standard library")
+                output.append("    sub rsp, 40")
+                output.append("    call _init_stdio")
+                output.append("    add rsp, 40")
+                output.append("")
+
+            output.append("    ; User code begins")
+            output.append(code_lines)
+            output.append("    ; User code ends")
             output.append("")
-        
-        output.append("    ; User code begins")
-        output.append(code_lines)
-        output.append("    ; User code ends")
-        output.append("")
-        
-        output.append("    ; Exit program")
-        output.append("    xor rcx, rcx")
-        output.append("    call ExitProcess")
+
+            output.append("    ; Exit program")
+            output.append("    xor rcx, rcx")
+            output.append("    call ExitProcess")
+        else:
+            # User provides their own sections and likely their own entrypoint; just append
+            output.append(code_lines)
         
         return '\n'.join(output)
     

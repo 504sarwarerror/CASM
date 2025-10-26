@@ -57,6 +57,7 @@ class CLI:
             'run': False,
             'verbose': False,
             'target': 'windows',
+            'ldflags': '',
             'help': False
         }
         
@@ -90,6 +91,14 @@ class CLI:
                     i += 2
                 else:
                     print("[!] Error: --target requires a value (windows)")
+                    return None
+            elif arg == '--ldflags':
+                # Accept a single string containing linker flags (quote as needed)
+                if i + 1 < len(args):
+                    config['ldflags'] = args[i + 1]
+                    i += 2
+                else:
+                    print("[!] Error: --ldflags requires a quoted string of flags (e.g. '-L/path -lSDL2')")
                     return None
             
             elif arg == '--build':
