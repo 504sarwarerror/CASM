@@ -177,7 +177,6 @@ class CodeGenerator:
         # mark end line
         end_line = self.current_token().line if self.current_token() else start_line
         # emit end marker
-        self.output.append(f"; __GEN_END__ {block_id} {end_line}")
 
         if self.current_token() and self.current_token().type == TokenType.ENDIF:
             self.advance()
@@ -233,7 +232,6 @@ class CodeGenerator:
 
         # emit end marker
         end_line = self.current_token().line if self.current_token() else start_line
-        self.output.append(f"; __GEN_END__ {block_id} {end_line}")
 
         if self.current_token() and self.current_token().type == TokenType.ENDFOR:
             self.advance()
@@ -298,7 +296,6 @@ class CodeGenerator:
         
         # emit end marker
         end_line = self.current_token().line if self.current_token() else start_line
-        self.output.append(f"; __GEN_END__ {block_id} {end_line}")
 
         if self.current_token() and self.current_token().type == TokenType.ENDWHILE:
             self.advance()
@@ -360,7 +357,6 @@ class CodeGenerator:
         
         # emit end marker
         end_line = self.current_token().line if self.current_token() else start_line
-        self.output.append(f"; __GEN_END__ {block_id} {end_line}")
 
         if self.current_token() and self.current_token().type == TokenType.ENDFUNC:
             self.advance()
@@ -485,7 +481,6 @@ class CodeGenerator:
 
         # emit end marker for this call
         end_line = self.current_token().line if self.current_token() else start_line
-        self.output.append(f"; __GEN_END__ {block_id} {end_line}")
     
     def generate_print(self, args):
         if not args:

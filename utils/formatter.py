@@ -200,7 +200,6 @@ def format_and_merge(original: str, generated_helpers: List[str], gen_blocks: di
 
     # append any other generated helpers (code_lines not part of blocks)
     if generated_helpers:
-        out_lines.append('; Generated helper lines')
         for ln in generated_helpers:
             if ln.strip():
                 out_lines.append(ln)

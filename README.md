@@ -1,8 +1,8 @@
-A contemporary high-level front-end for NASM (Windows x64 focused) that accepts a C-like/assembly hybrid language and generates NASM assembly code. Write high-level constructs like functions, loops, and conditionals while maintaining the power of assembly.
+A contemporary high-level front-end for NASM (Windows x64 focused) that accepts a C-like/assembly hybrid language and generates NASM assembly code. Write high-level constructs like loops, and conditionals while maintaining the power of assembly.
 
 ## Features
 
-- High-level constructs: `if/elif/else`, `for`, `while`, `func`, `call`
+- High-level constructs: `if/elif/else`, `for`, `while`, `print`
 - Built-in standard library: I/O, strings, math, arrays, memory operations
 - Seamless inline assembly passthrough
 - Windows x64 NASM output (adaptable to other platforms)
@@ -102,37 +102,7 @@ call println rax
 call println
 ```
 
-### 2. Functions
-
-#### Defining Functions
-
-```nasm
-func my_function(name)
-    call println name
-    return
-endfunc
-```
-
-#### Calling Functions
-
-Two calling conventions are supported:
-
-```nasm
-; Space-separated arguments
-call my_function "hello"
-
-; Parenthesized arguments
-call my_function("hello")
-```
-
-#### Function Details
-
-- **Parameter limit**: Up to 4 parameters supported
-- **Parameter mapping**: Mapped to `RCX`, `RDX`, `R8`, `R9` on Windows x64
-- **Local parameters**: Parameter names become local identifiers, remapped to callee-saved registers (`r12`, `r13`, etc.)
-- **Return**: Use `return` keyword to exit early; functions end with `ret` in generated assembly
-
-### 3. Control Flow
+### 2. Control Flow
 
 #### If/Elif/Else
 
@@ -176,13 +146,13 @@ break       ; Exit the loop immediately
 continue    ; Skip to next iteration
 ```
 
-### 4. Variables & Registers
+### 3. Variables & Registers
 
 - The language expects you to use **registers** for storage (`rax`, `rbx`, `rcx`, etc.)
 - High-level constructs automatically manage value movement between registers and temporaries
 - No explicit variable declaration needed - registers are your variables
 
-### 5. Inline Assembly
+### 4. Inline Assembly
 
 Any line not recognized as a high-level keyword is passed through verbatim:
 
@@ -302,7 +272,6 @@ endif
 
 ## Limitations & Caveats
 
-- **Parameter limit**: Function calls support up to 4 arguments (Windows x64 calling convention: `RCX`, `RDX`, `R8`, `R9`)
 - **Platform focus**: Primarily designed for Windows x64 NASM output
 - **Windows API dependencies**: Some stdlib functions assume Windows APIs (`WriteConsoleA`, etc.)
 - **Register allocation**: Simple register allocator may have conflicts with heavy variable usage
