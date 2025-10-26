@@ -15,6 +15,9 @@ class CodeGenerator:
         self.functions = {}
         self.current_function = None
         self.register_map = {}
+        # default to 64-bit generation; can be switched to 32-bit by
+        # passing bits=32 when constructing CodeGenerator.
+        self.bits = 64
         self._reg_pool = ['r12', 'r13', 'r14', 'r15', 'rbx']
     
     def generate(self):
@@ -23,6 +26,22 @@ class CodeGenerator:
             
             if token.type == TokenType.EOF:
                 break
+            # Allow a top-level 'bits 32' or 'bits 64' directive in the source
+            # to switch code generation mode.
+            elif token.type == TokenType.IDENTIFIER and str(token.value).lower() == 'bits':
+                # consume 'bits'
+                self.advance()
+                num = self.current_token()
+                if num and num.type == TokenType.NUMBER:
+                    try:
+                        self.set_bits(int(num.value))
+                    except ValueError:
+                        raise SyntaxError(f"Line {num.line}: invalid bits value '{num.value}'")
+                    self.advance()
+                else:
+                    raise SyntaxError(f"Line {token.line}: expected number after 'bits'")
+                # skip any newline after directive
+                self.skip_newlines()
             elif token.type == TokenType.IF:
                 self.generate_if()
             elif token.type == TokenType.FOR:
@@ -50,7 +69,46 @@ class CodeGenerator:
             else:
                 self.advance()
         
+        # Ensure there's a text section in the final assembly output. If the
+        # user's source (or inline assembly) didn't include a `section .text`
+        # declaration, prepend one so assemblers (NASM/YASM) have a code
+        # section to put generated instructions into.
+        assembly_text = '\n'.join(self.output)
+        if 'section .text' not in assembly_text.lower():
+            # Prefer to insert the text section before any `global` directive
+            # (e.g. `global main`) so globals remain after the section line.
+            # If no `global` is present, insert after any leading `bits` or
+            # `default rel` directives. Fallback to the top if nothing
+            # recognizable is found.
+            insert_index = 0
+            found_global = False
+            for i, line in enumerate(self.output):
+                if line.lstrip().lower().startswith('global '):
+                    insert_index = i
+                    found_global = True
+                    break
+
+            if not found_global:
+                # look for trailing bits/default rel directives and place after
+                last_dir = -1
+                for i, line in enumerate(self.output):
+                    s = line.strip().lower()
+                    if s.startswith('bits ') or s.startswith('default rel'):
+                        last_dir = i
+                if last_dir != -1:
+                    insert_index = last_dir + 1
+                else:
+                    insert_index = 0
+
+            self.output.insert(insert_index, 'section .text')
+
         return '\n'.join(self.output), self.data_section, self.stdlib_used
+
+    def set_bits(self, bits: int):
+        """Set generation mode to 32 or 64 bit. Call before generate()."""
+        if bits not in (32, 64):
+            raise ValueError("bits must be 32 or 64")
+        self.bits = bits
     
     def current_token(self):
         return self.tokens[self.pos] if self.pos < len(self.tokens) else None
@@ -68,14 +126,19 @@ class CodeGenerator:
         return self.register_map.get(name, name)
 
     def allocate_reg_for(self, orig_name):
+        # lazy-init appropriate register pool for 32/64-bit modes
+        if self.bits == 32 and self._reg_pool[0].startswith('r'):
+            # 32-bit callee-saved candidates
+            self._reg_pool = ['ebx', 'esi', 'edi']
+
         # find a free callee-saved register from the pool
         for r in self._reg_pool:
             if r not in self.register_map.values():
                 self.register_map[orig_name] = r
                 return r
-        # fallback: reuse rbx
-        self.register_map[orig_name] = 'rbx'
-        return 'rbx'
+        # fallback: reuse the first pool entry
+        self.register_map[orig_name] = self._reg_pool[0]
+        return self._reg_pool[0]
     
     def skip_newlines(self):
         while self.current_token() and self.current_token().type == TokenType.NEWLINE:
@@ -351,23 +414,40 @@ class CodeGenerator:
             'params': params
         }
 
-        self.output.append(f"\n{func_name}:")
-        self.output.append("    push rbp")
-        self.output.append("    mov rbp, rsp")
+        # Emit function label and prologue according to target bitness
+        if self.bits == 64:
+            self.output.append(f"\n{func_name}:")
+            self.output.append("    push rbp")
+            self.output.append("    mov rbp, rsp")
 
-        # Map incoming parameters (RCX, RDX, R8, R9) to internal callee-saved regs
-        reg_map = ['rcx', 'rdx', 'r8', 'r9']
-        for i, p in enumerate(params):
-            internal = self.allocate_reg_for(p)
-            if i < len(reg_map):
-                self.output.append(f"    mov {internal}, {reg_map[i]}")
-            else:
-                # For simplicity, parameters beyond 4 are not supported yet.
-                self.output.append(f"    ; WARNING: parameter '{p}' passed on stack not supported")
+            # Map incoming parameters (RCX, RDX, R8, R9) to internal callee-saved regs
+            reg_map = ['rcx', 'rdx', 'r8', 'r9']
+            for i, p in enumerate(params):
+                internal = self.allocate_reg_for(p)
+                if i < len(reg_map):
+                    self.output.append(f"    mov {internal}, {reg_map[i]}")
+                else:
+                    # For simplicity, parameters beyond 4 are not supported yet.
+                    self.output.append(f"    ; WARNING: parameter '{p}' passed on stack not supported")
+        else:
+            # 32-bit: prefix user function names with '_' to match C/Win decorations
+            self.output.append(f"\n_{func_name}:")
+            self.output.append("    push ebp")
+            self.output.append("    mov ebp, esp")
+
+            # Load parameters from the stack [ebp+8], [ebp+12], ... into internal regs
+            for i, p in enumerate(params):
+                internal = self.allocate_reg_for(p)
+                offset = 8 + 4 * i
+                self.output.append(f"    mov {internal}, dword [ebp+{offset}]")
 
         self.generate_block([TokenType.ENDFUNC])
 
-        self.output.append("    pop rbp")
+        # function epilogue depends on bitness
+        if self.bits == 64:
+            self.output.append("    pop rbp")
+        else:
+            self.output.append("    pop ebp")
         self.output.append("    ret")
         
 
@@ -382,7 +462,10 @@ class CodeGenerator:
     
     def generate_return(self):
         self.advance()
-        self.output.append("    pop rbp")
+        if self.bits == 64:
+            self.output.append("    pop rbp")
+        else:
+            self.output.append("    pop ebp")
         self.output.append("    ret")
     
     def generate_break(self):
@@ -468,8 +551,14 @@ class CodeGenerator:
             self.generate_print(args)
         elif func_name == 'println':
             self.generate_print(args)
-            self.output.append("    lea rcx, [rel _newline_str]")
-            self.output.append("    call _print_string")
+            if self.bits == 64:
+                self.output.append("    lea rcx, [rel _newline_str]")
+                self.output.append("    call _print_string")
+            else:
+                # push string pointer and call (cdecl-like)
+                self.output.append("    push dword _newline_str")
+                self.output.append("    call _print_string")
+                self.output.append("    add esp, 4")
             self.stdlib_used.add('print')
         elif func_name == 'scan':
             self.generate_scan(args)
@@ -478,23 +567,43 @@ class CodeGenerator:
         elif func_name in ['strlen','strcpy','strcmp','strcat','abs','min','max','pow','arraysum','arrayfill','arraycopy','memset','memcpy','rand','sleep']:
             self.generate_stdlib_call(func_name, args)
         else:
-            # User-defined function call: move up to 4 args into RCX,RDX,R8,R9 then call
+            # User-defined function call: on x64 move up to 4 args into RCX,RDX,R8,R9
+            # on x86 push args (right-to-left) and call _func
             if args:
                 arg_str = ', '.join(arg.value for arg in args)
                 self.output.append(f"    ; Call {func_name} with args: {arg_str}")
+            if self.bits == 64:
+                reg_map = ['rcx', 'rdx', 'r8', 'r9']
+                for i, arg in enumerate(args[:4]):
+                    if arg.type == TokenType.STRING:
+                        str_label = f"_str_{self.string_counter}"
+                        self.string_counter += 1
+                        escaped_str = arg.value.replace('`', '\\`')
+                        self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
+                        self.output.append(f"    lea {reg_map[i]}, [rel {str_label}]")
+                    elif arg.type in [TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER]:
+                        self.output.append(f"    mov {reg_map[i]}, {arg.value}")
 
-            reg_map = ['rcx', 'rdx', 'r8', 'r9']
-            for i, arg in enumerate(args[:4]):
-                if arg.type == TokenType.STRING:
-                    str_label = f"_str_{self.string_counter}"
-                    self.string_counter += 1
-                    escaped_str = arg.value.replace('`', '\\`')
-                    self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
-                    self.output.append(f"    lea {reg_map[i]}, [rel {str_label}]")
-                elif arg.type in [TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER]:
-                    self.output.append(f"    mov {reg_map[i]}, {arg.value}")
+                self.output.append(f"    call {func_name}")
+            else:
+                # 32-bit: push args right-to-left
+                for arg in reversed(args):
+                    if arg.type == TokenType.STRING:
+                        str_label = f"_str_{self.string_counter}"
+                        self.string_counter += 1
+                        escaped_str = arg.value.replace('`', '\\`')
+                        self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
+                        self.output.append(f"    push dword {str_label}")
+                    elif arg.type in [TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER]:
+                        val = arg.value
+                        if arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
+                            val = self.remap_reg(arg.value)
+                        self.output.append(f"    push {val}")
 
-            self.output.append(f"    call {func_name}")
+                # call with underscore prefix for user functions on x86
+                self.output.append(f"    call _{func_name}")
+                if args:
+                    self.output.append(f"    add esp, {4 * len(args)}")
 
         # emit end marker for this call
         end_line = self.current_token().line if self.current_token() else start_line
@@ -506,50 +615,99 @@ class CodeGenerator:
         
         arg = args[0]
         
-        if arg.type == TokenType.STRING:
-            str_label = f"_str_{self.string_counter}"
-            self.string_counter += 1
-            escaped_str = arg.value.replace('`', '\\`')
-            self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
-            self.output.append(f"    lea rcx, [rel {str_label}]")
-            self.output.append(f"    call _print_string")
-        elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
-            val = self.remap_reg(arg.value)
-            self.output.append(f"    mov rcx, {val}")
-            self.output.append(f"    call _print_number")
-        elif arg.type == TokenType.NUMBER:
-            self.output.append(f"    mov rcx, {arg.value}")
-            self.output.append(f"    call _print_number")
+        if self.bits == 64:
+            if arg.type == TokenType.STRING:
+                str_label = f"_str_{self.string_counter}"
+                self.string_counter += 1
+                escaped_str = arg.value.replace('`', '\\`')
+                self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
+                self.output.append(f"    lea rcx, [rel {str_label}]")
+                self.output.append(f"    call _print_string")
+            elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
+                val = self.remap_reg(arg.value)
+                self.output.append(f"    mov rcx, {val}")
+                self.output.append(f"    call _print_number")
+            elif arg.type == TokenType.NUMBER:
+                self.output.append(f"    mov rcx, {arg.value}")
+                self.output.append(f"    call _print_number")
+        else:
+            # 32-bit: push arguments and call cdecl-style
+            if arg.type == TokenType.STRING:
+                str_label = f"_str_{self.string_counter}"
+                self.string_counter += 1
+                escaped_str = arg.value.replace('`', '\\`')
+                self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
+                self.output.append(f"    push dword {str_label}")
+                self.output.append(f"    call _print_string")
+                self.output.append(f"    add esp, 4")
+            elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
+                val = self.remap_reg(arg.value)
+                self.output.append(f"    push {val}")
+                self.output.append(f"    call _print_number")
+                self.output.append(f"    add esp, 4")
+            elif arg.type == TokenType.NUMBER:
+                self.output.append(f"    push {arg.value}")
+                self.output.append(f"    call _print_number")
+                self.output.append(f"    add esp, 4")
     
     def generate_scan(self, args):
         if not args:
             return
         buffer = args[0].value
         buffer_size = args[1].value if len(args) > 1 else "256"
-        self.output.append(f"    lea rcx, [rel {buffer}]")
-        self.output.append(f"    mov rdx, {buffer_size}")
-        self.output.append(f"    call _scan_string")
+        if self.bits == 64:
+            self.output.append(f"    lea rcx, [rel {buffer}]")
+            self.output.append(f"    mov rdx, {buffer_size}")
+            self.output.append(f"    call _scan_string")
+        else:
+            # push size then buffer pointer
+            self.output.append(f"    push {buffer_size}")
+            self.output.append(f"    push dword {buffer}")
+            self.output.append(f"    call _scan_string")
+            self.output.append(f"    add esp, 8")
     
     def generate_scanint(self, args):
         if not args:
             return
         var = args[0].value
-        self.output.append(f"    lea rcx, [rel {var}]")
-        self.output.append(f"    call _scanint")
+        if self.bits == 64:
+            self.output.append(f"    lea rcx, [rel {var}]")
+            self.output.append(f"    call _scanint")
+        else:
+            self.output.append(f"    push dword {var}")
+            self.output.append(f"    call _scanint")
+            self.output.append(f"    add esp, 4")
     
     def generate_stdlib_call(self, func_name, args):
-        # Map arguments to registers (Windows x64 calling convention)
-        reg_map = ['rcx', 'rdx', 'r8', 'r9']
-        
-        for i, arg in enumerate(args[:4]):
-            if i < len(reg_map):
+        # Support both x64 (register) and x86 (stack push) argument passing
+        if self.bits == 64:
+            # Map arguments to registers (Windows x64 calling convention)
+            reg_map = ['rcx', 'rdx', 'r8', 'r9']
+            for i, arg in enumerate(args[:4]):
+                if i < len(reg_map):
+                    if arg.type == TokenType.STRING:
+                        str_label = f"_str_{self.string_counter}"
+                        self.string_counter += 1
+                        escaped_str = arg.value.replace('`', '\\`')
+                        self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
+                        self.output.append(f"    lea {reg_map[i]}, [rel {str_label}]")
+                    elif arg.type in [TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER]:
+                        self.output.append(f"    mov {reg_map[i]}, {arg.value}")
+            self.output.append(f"    call _{func_name}")
+        else:
+            # 32-bit: push args right-to-left and call underscore-prefixed name
+            for arg in reversed(args):
                 if arg.type == TokenType.STRING:
                     str_label = f"_str_{self.string_counter}"
                     self.string_counter += 1
                     escaped_str = arg.value.replace('`', '\\`')
                     self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
-                    self.output.append(f"    lea {reg_map[i]}, [rel {str_label}]")
+                    self.output.append(f"    push dword {str_label}")
                 elif arg.type in [TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER]:
-                    self.output.append(f"    mov {reg_map[i]}, {arg.value}")
-        
-        self.output.append(f"    call _{func_name}")
+                    val = arg.value
+                    if arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
+                        val = self.remap_reg(arg.value)
+                    self.output.append(f"    push {val}")
+            self.output.append(f"    call _{func_name}")
+            if args:
+                self.output.append(f"    add esp, {4 * len(args)}")

@@ -187,14 +187,46 @@ def format_and_merge(original: str, generated_helpers: List[str], gen_blocks: di
         out_lines.append('')
 
     # inline generated blocks into text
+    # Ensure we include an explicit `section .text` header before any text lines.
+    # The collector intentionally skipped original section header lines; add it
+    # back unless one of the generated helper lines already contains it.
+    has_text_header = False
+    # check generated helpers and deps for an existing text header
+    # If found in generated_helpers, remove those lines so we don't append
+    # the header at the end later; we'll add a single header in the
+    # correct place below.
+    if generated_helpers:
+        filtered_helpers = []
+        for ln in generated_helpers:
+            # Remove any 'section .text' lines emitted by the generator so
+            # they don't get appended at the end. Do NOT treat these as the
+            # authoritative header — we'll add the section header right
+            # before the text block below (unless a dependency provides one).
+            if ln and ln.strip().lower().startswith('section .text'):
+                continue
+            filtered_helpers.append(ln)
+        generated_helpers = filtered_helpers
+    else:
+        generated_helpers = []
+
+    if not has_text_header:
+        for ln in deps.get('code', '').splitlines():
+            if ln.strip().lower().startswith('section .text'):
+                has_text_header = True
+                break
+
     if gen_blocks:
-        # reconstruct original text lines with 1-based indexing mapping
         orig_lines = parts['text']
-        # original text starts after first section; reconstruct with line numbers not tracked here
-        # Simpler: append original text and then append generated blocks (they were already inlined by caller)
+        # Always ensure a text section header appears immediately before the
+        # text block (unless a dependency already declared one). We removed
+        # any stray header from generated_helpers above so we won't duplicate.
+        if not has_text_header and orig_lines:
+            out_lines.append('section .text')
         out_lines.extend(strip_comments(orig_lines))
         out_lines.append('')
     else:
+        if not has_text_header and text:
+            out_lines.append('section .text')
         out_lines.extend(strip_comments(text))
         out_lines.append('')
 
