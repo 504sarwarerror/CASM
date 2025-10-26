@@ -10,7 +10,7 @@ class CLI:
     
     @staticmethod
     def print_usage():
-        print("Usage: python compiler.py <input.asm> [options]")
+        print("Usage: casm <input.asm> [options]")
         print()
         print("Options:")
         print("  -o <file>      Specify output file")
@@ -22,27 +22,10 @@ class CLI:
         print("  -h, --help     Show help")
         print()
         print("Examples:")
-        print("  python compiler.py program.asm")
-        print("  python compiler.py program.asm --build")
-        print("  python compiler.py program.asm --exe --run")
-        print("  python compiler.py program.asm -o output.asm -v")
-        print()
-        print("Supported high-level features:")
-        print("  • if/elif/else/endif")
-        print("  • for/endfor loops")
-        print("  • while/endwhile loops")
-        print("  • break/continue")
-        print("  • func/endfunc")
-        print("  • call with standard library functions")
-        print()
-        print("Standard library functions:")
-        print("  I/O:     print, println, scan, scan_int")
-        print("  String:  strlen, strcpy, strcmp, strcat")
-        print("  Math:    abs, min, max, pow")
-        print("  Array:   array_sum, array_fill, array_copy")
-        print("  Memory:  memset, memcpy")
-        print("  Other:   rand, sleep")
-        print()
+        print("  casm program.asm")
+        print("  casm program.asm --build")
+        print("  casm program.asm --exe --run")
+        print("  casm program.asm -o output.asm -v")
     
     @staticmethod
     def parse_args(args):
@@ -77,7 +60,7 @@ class CLI:
                     print("[!] Error: -o requires filename")
                     return None
             
-            elif arg in ['-e', '--exe']:
+            elif arg in ['-e', '--exe', '--e']:
                 config['exe'] = True
                 config['build'] = True
                 i += 1

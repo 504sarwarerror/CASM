@@ -2,7 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-CASM_PY="$SCRIPT_DIR/casm.py"
+# Use main.py as the canonical entrypoint
+CASM_PY="$SCRIPT_DIR/main.py"
 
 DEST_DIR=""
 FORCE=false
@@ -10,7 +11,7 @@ FORCE=false
 print_usage() {
   cat <<EOF
 Usage: $0 [--dest DIR] [--force]
-Installs a 'casm' wrapper that runs casm.py with python.
+Installs a 'casm' wrapper that runs main.py with python.
 
 Options:
   --dest DIR    Install into DIR (overrides automatic choice)
@@ -42,7 +43,8 @@ while [[ ${#} -gt 0 ]]; do
 done
 
 if [ ! -f "$CASM_PY" ]; then
-  echo "Error: casm.py not found at $CASM_PY"
+  echo "Error: main.py not found at $CASM_PY"
+  echo "Please ensure you have renamed your entry script to 'main.py' or place main.py in the project root."
   exit 1
 fi
 
@@ -64,7 +66,7 @@ case "$UNAME_OUT" in
 esac
 
 echo "Installer detected platform: $PLATFORM"
-echo "casm.py: $CASM_PY"
+echo "main.py: $CASM_PY"
 echo "Installing to: $DEST_DIR"
 
 mkdir -p "$DEST_DIR"
@@ -78,10 +80,12 @@ install_unix_wrapper() {
   fi
 
   TMPFILE="$(mktemp /tmp/casm_wrapper.XXXXXX)"
+  # Use an unescaped here-doc but escape $@ so it's preserved literally in the
+  # generated wrapper while $CASM_PY is expanded at install time.
   cat > "$TMPFILE" <<EOF
 #!/usr/bin/env bash
-# Auto-generated wrapper to run casm.py
-exec python3 "$CASM_PY" "$@"
+# Auto-generated wrapper to run main.py
+exec python3 "$CASM_PY" "\$@"
 EOF
 
   chmod +x "$TMPFILE"
@@ -110,9 +114,10 @@ install_windows_wrappers() {
   fi
 
   # Bash-style wrapper (for Git Bash / MSYS / Cygwin)
+  # For the shell wrapper we also escape $@ to avoid expansion during install
   cat > "$target_sh" <<EOF
 #!/usr/bin/env bash
-exec python3 "$CASM_PY" "$@"
+exec python3 "$CASM_PY" "\$@"
 EOF
   chmod +x "$target_sh"
 
@@ -124,7 +129,7 @@ EOF
 
   cat > "$target_cmd" <<EOF
 @echo off
-REM Auto-generated wrapper to run casm.py
+REM Auto-generated wrapper to run main.py
 python "%CASM_PY_WIN%" %*
 EOF
 

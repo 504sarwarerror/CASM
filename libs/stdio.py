@@ -49,8 +49,8 @@ class StandardLibrary:
         """Initialize all library functions"""
         
         # === I/O INITIALIZATION ===
-        self.functions['_init_stdio'] = {
-            'code': '''_init_stdio:
+        self.functions['initstdio'] = {
+            'code': '''_initstdio:
     push rbp
     mov rbp, rsp
     sub rsp, 32
@@ -145,7 +145,7 @@ _print_hex:
 .fmt db "0x%llX", 0''',
             'bss': ['_bytes_written resd 1', '_number_buffer resb 64'],
             'externs': {'WriteConsoleA', 'sprintf'},
-            'requires': ['_init_stdio']
+            'requires': ['initstdio']
         }
         
         self.functions['println'] = {
@@ -216,7 +216,7 @@ _scan_int:
 .fmt db "%lld", 0''',
             'bss': ['_bytes_read resd 1'],
             'externs': {'ReadConsoleA', 'sscanf'},
-            'requires': ['_init_stdio']
+            'requires': ['initstdio']
         }
         
         # === STRING FUNCTIONS ===
@@ -235,8 +235,8 @@ _scan_int:
             'externs': set()
         }
         
-        self.functions['strcpy'] = {
-            'code': '''_strcpy:
+        self.functions['scanint'] = {
+            'code': '''_scanint:
     push r12
     mov r12, rcx
 .loop:
@@ -244,11 +244,11 @@ _scan_int:
     mov [rcx], al
     test al, al
     jz .done
-    inc rcx
+    call _scan_string
     inc rdx
     jmp .loop
 .done:
-    mov rax, r12
+    call sscanf
     pop r12
     ret''',
             'externs': set()
@@ -359,8 +359,8 @@ _scan_int:
         }
         
         # === ARRAY FUNCTIONS ===
-        self.functions['array_sum'] = {
-            'code': '''_array_sum:
+        self.functions['arraysum'] = {
+            'code': '''_arraysum:
     xor rax, rax
     test rdx, rdx
     jz .done
@@ -374,8 +374,8 @@ _scan_int:
             'externs': set()
         }
         
-        self.functions['array_fill'] = {
-            'code': '''_array_fill:
+        self.functions['arrayfill'] = {
+            'code': '''_arrayfill:
     test rdx, rdx
     jz .done
 .loop:
@@ -388,8 +388,8 @@ _scan_int:
             'externs': set()
         }
         
-        self.functions['array_copy'] = {
-            'code': '''_array_copy:
+        self.functions['arraycopy'] = {
+            'code': '''_arraycopy:
     test r8, r8
     jz .done
 .loop:

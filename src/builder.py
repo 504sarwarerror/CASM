@@ -22,8 +22,15 @@ class Builder:
         obj_ext = '.obj' if self.target == 'windows' else '.o'
         exe_ext = '.exe' if self.target == 'windows' else ''
 
-        obj_file = self.compiled_file.replace('.asm', obj_ext)
-        exe_file = self.compiled_file.replace('.asm', exe_ext)
+        # If the compiled_file is the generated asm named like <build>/<name>-gen.asm
+        # we want the object and executable to be <build>/<name>.obj and <build>/<name>.exe
+        if self.compiled_file.endswith('-gen.asm'):
+            base_no_gen = self.compiled_file[:-len('-gen.asm')]
+        else:
+            base_no_gen = os.path.splitext(self.compiled_file)[0]
+
+        obj_file = base_no_gen + obj_ext
+        exe_file = base_no_gen + exe_ext
         
         self.log(f"[*] Assembling {self.compiled_file}...")
         if not self.assemble_file(self.compiled_file, obj_file):
@@ -134,9 +141,15 @@ class Builder:
             return False
     
     def run_executable(self):
-        exe_file = self.compiled_file.replace('.asm', '.exe')
-        
-        if not os.path.exists(exe_file):
+        # Use the same base-name logic as assemble_and_link to find the exe
+        if self.compiled_file.endswith('-gen.asm'):
+            base_no_gen = self.compiled_file[:-len('-gen.asm')]
+        else:
+            base_no_gen = os.path.splitext(self.compiled_file)[0]
+
+        exe_file = base_no_gen + ('.exe' if self.target == 'windows' else '')
+
+        if exe_file and not os.path.exists(exe_file):
             print(f"[!] Executable not found: {exe_file}")
             return False
         
