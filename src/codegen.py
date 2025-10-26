@@ -143,6 +143,73 @@ class CodeGenerator:
     def skip_newlines(self):
         while self.current_token() and self.current_token().type == TokenType.NEWLINE:
             self.advance()
+
+    def parse_operand(self):
+        """Parse an operand which may be:
+        - a register (TokenType.REGISTER)
+        - an identifier (TokenType.IDENTIFIER)
+        - a memory operand like `[ident]` or `byte [ident]` (size prefix + bracket)
+
+        Returns a tuple (operand_string, start_token) where operand_string is the
+        textual assembly operand to use in generated code and start_token is the
+        token where parsing began (useful for error line numbers).
+        """
+        tok = self.current_token()
+        if not tok:
+            return None, None
+
+        # size-prefixed memory: e.g. "byte [running]"
+        if tok.type == TokenType.IDENTIFIER and (self.pos + 1) < len(self.tokens) and self.tokens[self.pos + 1].type == TokenType.LBRACKET:
+            size = tok.value
+            start = tok
+            # consume size identifier
+            self.advance()
+
+            # expect '['
+            if not self.current_token() or self.current_token().type != TokenType.LBRACKET:
+                raise SyntaxError(f"Line {start.line}: Expected '[' after size specifier '{size}'")
+            self.advance()
+
+            inner = self.current_token()
+            if not inner or inner.type not in [TokenType.IDENTIFIER, TokenType.REGISTER]:
+                raise SyntaxError(f"Line {inner.line if inner else start.line}: Expected identifier or register inside brackets")
+
+            inner_val = inner.value
+            if inner.type == TokenType.REGISTER:
+                inner_val = self.remap_reg(inner_val)
+            self.advance()
+
+            if not self.current_token() or self.current_token().type != TokenType.RBRACKET:
+                raise SyntaxError(f"Line {start.line}: Expected closing ']' for memory operand")
+            self.advance()
+
+            return f"{size} [{inner_val}]", start
+
+        # direct memory: [ident]
+        if tok.type == TokenType.LBRACKET:
+            start = tok
+            self.advance()
+            inner = self.current_token()
+            if not inner or inner.type not in [TokenType.IDENTIFIER, TokenType.REGISTER]:
+                raise SyntaxError(f"Line {start.line}: Expected identifier or register inside brackets")
+            inner_val = inner.value
+            if inner.type == TokenType.REGISTER:
+                inner_val = self.remap_reg(inner_val)
+            self.advance()
+            if not self.current_token() or self.current_token().type != TokenType.RBRACKET:
+                raise SyntaxError(f"Line {start.line}: Expected closing ']' for memory operand")
+            self.advance()
+            return f"[{inner_val}]", start
+
+        # simple identifier or register
+        if tok.type in [TokenType.IDENTIFIER, TokenType.REGISTER]:
+            val = tok.value
+            start = tok
+            self.advance()
+            return val, start
+
+        # anything else is invalid here
+        raise SyntaxError(f"Line {tok.line if tok else '?'}: Unexpected token '{tok.value if tok else None}' when parsing operand")
     
     def generate_if(self):
         # mark the start line of this high-level block so we can replace it
@@ -153,23 +220,25 @@ class CodeGenerator:
         self.output.append(f"; __GEN_START__ {block_id} {start_line}")
         self.advance()
         
-        # Expect: IF <identifier|register> <comparison-op> <number|identifier|register>
-        var_token = self.current_token()
-        if not var_token or var_token.type not in [TokenType.IDENTIFIER, TokenType.REGISTER]:
-            raise SyntaxError(f"Line {var_token.line if var_token else '?'}: Expected identifier or register after 'if'")
-        var = var_token.value
-        self.advance()
-        
+        # Expect: IF <operand> <comparison-op> <number|operand>
+        var, var_token = self.parse_operand()
+        if not var or not var_token:
+            raise SyntaxError(f"Line {var_token.line if var_token else '?'}: Expected identifier, register or memory operand after 'if'")
+
         op = self.current_token()
         if not op or op.type not in [TokenType.EQ, TokenType.NE, TokenType.LT, TokenType.GT, TokenType.LE, TokenType.GE]:
             raise SyntaxError(f"Line {op.line if op else '?'}: Expected comparison operator after '{var}' in if-statement")
         self.advance()
-        
+
+        # Right-hand side can be a number or another operand (identifier/register/memory)
         value_token = self.current_token()
-        if not value_token or value_token.type not in [TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER]:
-            raise SyntaxError(f"Line {value_token.line if value_token else '?'}: Expected number, identifier or register after comparison in if-statement")
-        value = value_token.value
-        self.advance()
+        if not value_token:
+            raise SyntaxError(f"Line {op.line if op else '?'}: Expected value after comparison in if-statement")
+        if value_token.type == TokenType.NUMBER:
+            value = value_token.value
+            self.advance()
+        else:
+            value, _ = self.parse_operand()
         self.skip_newlines()
         
         label_next = self.get_label()
@@ -209,20 +278,22 @@ class CodeGenerator:
                 label_next = self.get_label()
                 
                 self.advance()
-                var_token = self.current_token()
-                if not var_token or var_token.type not in [TokenType.IDENTIFIER, TokenType.REGISTER]:
-                    raise SyntaxError(f"Line {var_token.line if var_token else '?'}: Expected identifier or register after 'elif'")
-                var = var_token.value
-                self.advance()
+                var, var_token = self.parse_operand()
+                if not var or not var_token:
+                    raise SyntaxError(f"Line {var_token.line if var_token else '?'}: Expected identifier, register or memory operand after 'elif'")
                 op = self.current_token()
                 if not op or op.type not in [TokenType.EQ, TokenType.NE, TokenType.LT, TokenType.GT, TokenType.LE, TokenType.GE]:
                     raise SyntaxError(f"Line {op.line if op else '?'}: Expected comparison operator after '{var}' in elif-statement")
                 self.advance()
+
                 value_token = self.current_token()
-                if not value_token or value_token.type not in [TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER]:
-                    raise SyntaxError(f"Line {value_token.line if value_token else '?'}: Expected number, identifier or register after comparison in elif-statement")
-                value = value_token.value
-                self.advance()
+                if not value_token:
+                    raise SyntaxError(f"Line {op.line if op else '?'}: Expected value after comparison in elif-statement")
+                if value_token.type == TokenType.NUMBER:
+                    value = value_token.value
+                    self.advance()
+                else:
+                    value, _ = self.parse_operand()
                 self.skip_newlines()
                 
                 var_m = self.remap_reg(var)
@@ -319,12 +390,10 @@ class CodeGenerator:
         self.output.append(f"; __GEN_START__ {block_id} {start_line}")
         self.advance()
 
-        # Expect: WHILE <identifier|register> <comparison-op> <number|identifier|register>
-        var_token = self.current_token()
-        if not var_token or var_token.type not in [TokenType.IDENTIFIER, TokenType.REGISTER]:
-            raise SyntaxError(f"Line {var_token.line if var_token else '?'}: Expected identifier or register after 'while'")
-        var = var_token.value
-        self.advance()
+        # Expect: WHILE <operand> <comparison-op> <number|operand>
+        var, var_token = self.parse_operand()
+        if not var or not var_token:
+            raise SyntaxError(f"Line {var_token.line if var_token else '?'}: Expected identifier, register or memory operand after 'while'")
 
         op = self.current_token()
         if not op or op.type not in [TokenType.EQ, TokenType.NE, TokenType.LT, TokenType.GT, TokenType.LE, TokenType.GE]:
@@ -332,10 +401,13 @@ class CodeGenerator:
         self.advance()
 
         value_token = self.current_token()
-        if not value_token or value_token.type not in [TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER]:
-            raise SyntaxError(f"Line {value_token.line if value_token else '?'}: Expected number, identifier or register after comparison in while-statement")
-        value = value_token.value
-        self.advance()
+        if not value_token:
+            raise SyntaxError(f"Line {op.line if op else '?'}: Expected value after comparison in while-statement")
+        if value_token.type == TokenType.NUMBER:
+            value = value_token.value
+            self.advance()
+        else:
+            value, _ = self.parse_operand()
         self.skip_newlines()
         
         label_start = self.get_label()

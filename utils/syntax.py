@@ -202,49 +202,50 @@ class Compiler:
         gen_blocks = {}
         other_gen_lines = []
         if code_lines:
-            collecting = False
-            cur_id = None
-            cur_start = None
-            cur_lines = []
+            # Support nested generated blocks by using a stack. Each stack
+            # frame holds the block id, start line and collected lines.
+            stack = []
             for ln in code_lines.splitlines():
                 s = ln.strip()
                 if s.startswith('; __GEN_START__'):
                     parts = s.split()
-                    if len(parts) >= 3:
-                        cur_id = parts[2]
-                        # third token might be the start line
-                        try:
-                            cur_start = int(parts[3]) if len(parts) > 3 else None
-                        except Exception:
-                            cur_start = None
-                    else:
-                        cur_id = None
-                    collecting = True
-                    cur_lines = []
+                    bid = parts[2] if len(parts) >= 3 else None
+                    try:
+                        bstart = int(parts[3]) if len(parts) > 3 else None
+                    except Exception:
+                        bstart = None
+                    # push a new frame
+                    stack.append({'id': bid, 'start': bstart, 'lines': []})
                     continue
-                if s.startswith('; __GEN_END__') and collecting:
+
+                if s.startswith('; __GEN_END__'):
                     parts = s.split()
                     end_id = parts[2] if len(parts) >= 3 else None
                     try:
-                        cur_end = int(parts[3]) if len(parts) > 3 else None
+                        bend = int(parts[3]) if len(parts) > 3 else None
                     except Exception:
-                        cur_end = None
-                    if cur_id is not None and (end_id is None or end_id == cur_id):
-                        gen_blocks[cur_start] = {
-                            'start': cur_start,
-                            'end': cur_end,
-                            'lines': cur_lines.copy()
-                        }
-                    collecting = False
-                    cur_id = None
-                    cur_start = None
-                    cur_lines = []
+                        bend = None
+                    if stack:
+                        frame = stack.pop()
+                        # If this frame was nested inside another, merge its
+                        # collected lines into the parent so the outer block
+                        # replacement contains the inner content. Otherwise
+                        # record it as a top-level generated block.
+                        if stack:
+                            # merge into parent's lines
+                            stack[-1]['lines'].extend(frame['lines'])
+                        else:
+                            gen_blocks[frame['start']] = {
+                                'start': frame['start'],
+                                'end': bend,
+                                'lines': frame['lines'].copy()
+                            }
                     continue
 
-                if collecting:
-                    cur_lines.append(ln)
+                if stack:
+                    # append into the current (top) block
+                    stack[-1]['lines'].append(ln)
                 else:
-                    # collect any other generated helper lines (not part of blocks)
                     other_gen_lines.append(ln)
 
         # If we found generated blocks, replace the corresponding source

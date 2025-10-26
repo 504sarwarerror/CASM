@@ -215,8 +215,29 @@ def format_and_merge(original: str, generated_helpers: List[str], gen_blocks: di
                 has_text_header = True
                 break
 
+    def remove_highlevel_directives(lines: List[str]) -> List[str]:
+        """Remove source-level DSL directive lines (if/while/for/etc.) from text.
+
+        This prevents high-level statements from being left in the merged
+        assembly (which would be invalid NASM). We only remove lines that
+        start with a recognized keyword (ignoring leading whitespace).
+        """
+        directives = {'if', 'elif', 'else', 'endif', 'for', 'endfor', 'while', 'endwhile', 'func', 'endfunc'}
+        out = []
+        for ln in lines:
+            s = ln.strip()
+            if not s:
+                out.append(ln)
+                continue
+            first = s.split()[0].lower()
+            if first in directives:
+                # skip DSL directive lines
+                continue
+            out.append(ln)
+        return out
+
     if gen_blocks:
-        orig_lines = parts['text']
+        orig_lines = remove_highlevel_directives(parts['text'])
         # Always ensure a text section header appears immediately before the
         # text block (unless a dependency already declared one). We removed
         # any stray header from generated_helpers above so we won't duplicate.
