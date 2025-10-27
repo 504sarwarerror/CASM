@@ -12,6 +12,7 @@ blocks when instructed by the code generator via markers.
 """
 from typing import List, Set
 import re
+import os
 
 
 def strip_comments(lines: List[str]) -> List[str]:
@@ -167,6 +168,54 @@ def format_and_merge(original: str, generated_helpers: List[str], gen_blocks: di
     out_lines = []
     out_lines.extend(preamble)
     out_lines.append('')
+
+    def inline_includes(lines: List[str], seen: Set[str] = None) -> List[str]:
+        """Expand %include "path" directives by inlining the referenced file.
+
+        - Resolves paths relative to the current working directory.
+        - Prevents recursive includes using `seen` set.
+        - If the file can't be read, leaves the original include line as a comment
+          so the assembler still sees something informative.
+        """
+        if seen is None:
+            seen = set()
+        out = []
+        include_re = re.compile(r'^%\s*include\s+["\'](.+?)["\']', re.IGNORECASE)
+
+        for ln in lines:
+            m = include_re.match(ln.strip())
+            if not m:
+                out.append(ln)
+                continue
+
+            inc_path = m.group(1)
+            # resolve relative to cwd first
+            cand = os.path.abspath(os.path.join(os.getcwd(), inc_path))
+            if not os.path.exists(cand):
+                # try relative to project root (same as cwd here) or as given
+                cand = os.path.abspath(inc_path)
+
+            if not os.path.exists(cand):
+                # include not found — comment the directive for visibility
+                out.append(f'; WARNING: include not found: {inc_path}')
+                out.append(f'; {ln}')
+                continue
+
+            if cand in seen:
+                out.append(f'; WARNING: skipping recursive include: {inc_path}')
+                continue
+
+            try:
+                seen.add(cand)
+                with open(cand, 'r', encoding='utf-8') as f:
+                    inc_text = f.read()
+                # preserve included file lines as-is (they may contain sections/labels)
+                out.extend(inc_text.splitlines())
+            except Exception as e:
+                out.append(f'; WARNING: failed to read include {inc_path}: {e}')
+                out.append(f'; {ln}')
+
+        return out
 
     # externs
     if existing_externs:

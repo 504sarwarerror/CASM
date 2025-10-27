@@ -158,7 +158,7 @@ class CodeGenerator:
         if not tok:
             return None, None
 
-        # size-prefixed memory: e.g. "byte [running]"
+        # size-prefixed memory: e.g. "byte [running]" or "byte [i + 1]"
         if tok.type == TokenType.IDENTIFIER and (self.pos + 1) < len(self.tokens) and self.tokens[self.pos + 1].type == TokenType.LBRACKET:
             size = tok.value
             start = tok
@@ -168,43 +168,61 @@ class CodeGenerator:
             # expect '['
             if not self.current_token() or self.current_token().type != TokenType.LBRACKET:
                 raise SyntaxError(f"Line {start.line}: Expected '[' after size specifier '{size}'")
+            # consume '['
             self.advance()
 
-            inner = self.current_token()
-            if not inner or inner.type not in [TokenType.IDENTIFIER, TokenType.REGISTER]:
-                raise SyntaxError(f"Line {inner.line if inner else start.line}: Expected identifier or register inside brackets")
-
-            inner_val = inner.value
-            if inner.type == TokenType.REGISTER:
-                inner_val = self.remap_reg(inner_val)
-            self.advance()
+            # collect tokens until closing ']'
+            parts = []
+            while self.current_token() and self.current_token().type != TokenType.RBRACKET:
+                inner_tok = self.current_token()
+                # remap registers inside the expression
+                if inner_tok.type == TokenType.REGISTER:
+                    parts.append(self.remap_reg(inner_tok.value))
+                else:
+                    parts.append(str(inner_tok.value))
+                self.advance()
 
             if not self.current_token() or self.current_token().type != TokenType.RBRACKET:
                 raise SyntaxError(f"Line {start.line}: Expected closing ']' for memory operand")
+            # consume ']'
             self.advance()
 
+            inner_val = ' '.join(parts).strip()
+            if not inner_val:
+                raise SyntaxError(f"Line {start.line}: Empty memory operand '[]'")
             return f"{size} [{inner_val}]", start
 
         # direct memory: [ident]
         if tok.type == TokenType.LBRACKET:
             start = tok
+            # consume '['
             self.advance()
-            inner = self.current_token()
-            if not inner or inner.type not in [TokenType.IDENTIFIER, TokenType.REGISTER]:
-                raise SyntaxError(f"Line {start.line}: Expected identifier or register inside brackets")
-            inner_val = inner.value
-            if inner.type == TokenType.REGISTER:
-                inner_val = self.remap_reg(inner_val)
-            self.advance()
+            parts = []
+            while self.current_token() and self.current_token().type != TokenType.RBRACKET:
+                inner_tok = self.current_token()
+                if inner_tok.type == TokenType.REGISTER:
+                    parts.append(self.remap_reg(inner_tok.value))
+                else:
+                    parts.append(str(inner_tok.value))
+                self.advance()
+
             if not self.current_token() or self.current_token().type != TokenType.RBRACKET:
                 raise SyntaxError(f"Line {start.line}: Expected closing ']' for memory operand")
+            # consume ']'
             self.advance()
+
+            inner_val = ' '.join(parts).strip()
+            if not inner_val:
+                raise SyntaxError(f"Line {start.line}: Empty memory operand '[]'")
             return f"[{inner_val}]", start
 
-        # simple identifier or register
-        if tok.type in [TokenType.IDENTIFIER, TokenType.REGISTER]:
+        # simple identifier, register or number
+        if tok.type in [TokenType.IDENTIFIER, TokenType.REGISTER, TokenType.NUMBER]:
             val = tok.value
             start = tok
+            # remap registers to internal callee-saved names
+            if tok.type == TokenType.REGISTER:
+                val = self.remap_reg(val)
             self.advance()
             return val, start
 
@@ -231,21 +249,53 @@ class CodeGenerator:
         self.advance()
 
         # Right-hand side can be a number or another operand (identifier/register/memory)
-        value_token = self.current_token()
-        if not value_token:
+        rhs_token = self.current_token()
+        if not rhs_token:
             raise SyntaxError(f"Line {op.line if op else '?'}: Expected value after comparison in if-statement")
-        if value_token.type == TokenType.NUMBER:
-            value = value_token.value
+
+        if rhs_token.type == TokenType.NUMBER:
+            rhs_val = rhs_token.value
             self.advance()
+            rhs_tok_info = rhs_token = rhs_token
         else:
-            value, _ = self.parse_operand()
+            rhs_val, rhs_tok_info = self.parse_operand()
+
         self.skip_newlines()
-        
+
         label_next = self.get_label()
         label_end = self.get_label()
 
-        var_m = self.remap_reg(var)
-        self.output.append(f"    cmp {var_m}, {value}")
+        # Decide proper cmp ordering so NASM never sees immediate, immediate or
+        # immediate as the destination. If both sides are numeric, evaluate at
+        # compile-time and emit an unconditional jump when the condition is false.
+        if var_token.type == TokenType.NUMBER and (rhs_tok_info and rhs_tok_info.type == TokenType.NUMBER):
+            # both immediates: evaluate condition now
+            a = int(var)
+            b = int(rhs_val)
+            cond_map = {
+                TokenType.EQ: (a == b), TokenType.NE: (a != b),
+                TokenType.LT: (a < b), TokenType.GT: (a > b),
+                TokenType.LE: (a <= b), TokenType.GE: (a >= b)
+            }
+            if not cond_map.get(op.type, False):
+                # condition is false at compile time: skip true-block
+                self.output.append(f"    jmp {label_next}")
+        else:
+            # choose left and right so left is register/memory (valid cmp dest)
+            if var_token.type == TokenType.NUMBER:
+                # swap: rhs becomes left operand
+                left = rhs_val
+                # remap register if needed
+                if rhs_tok_info and rhs_tok_info.type == TokenType.REGISTER:
+                    left = self.remap_reg(left)
+                right = var
+            else:
+                left = var
+                if var_token.type == TokenType.REGISTER:
+                    left = self.remap_reg(left)
+                right = rhs_val
+
+            self.output.append(f"    cmp {left}, {right}")
 
         jump_map = {
             TokenType.EQ: 'jne', TokenType.NE: 'je',
@@ -286,23 +336,47 @@ class CodeGenerator:
                     raise SyntaxError(f"Line {op.line if op else '?'}: Expected comparison operator after '{var}' in elif-statement")
                 self.advance()
 
-                value_token = self.current_token()
-                if not value_token:
+                rhs_token = self.current_token()
+                if not rhs_token:
                     raise SyntaxError(f"Line {op.line if op else '?'}: Expected value after comparison in elif-statement")
-                if value_token.type == TokenType.NUMBER:
-                    value = value_token.value
+                if rhs_token.type == TokenType.NUMBER:
+                    rhs_val = rhs_token.value
                     self.advance()
+                    rhs_info = rhs_token
                 else:
-                    value, _ = self.parse_operand()
+                    rhs_val, rhs_info = self.parse_operand()
                 self.skip_newlines()
-                
-                var_m = self.remap_reg(var)
-                self.output.append(f"    cmp {var_m}, {value}")
-                try:
-                    jm2 = jump_map[op.type]
-                except KeyError:
-                    raise SyntaxError(f"Line {op.line}: Unsupported comparison operator '{op.value}' in elif-statement")
-                self.output.append(f"    {jm2} {label_next}")
+
+                # Handle numeric left-side or both-numeric like in `if 1 == 1`
+                if var_token.type == TokenType.NUMBER and (rhs_info and rhs_info.type == TokenType.NUMBER):
+                    a = int(var)
+                    b = int(rhs_val)
+                    cond_map = {
+                        TokenType.EQ: (a == b), TokenType.NE: (a != b),
+                        TokenType.LT: (a < b), TokenType.GT: (a > b),
+                        TokenType.LE: (a <= b), TokenType.GE: (a >= b)
+                    }
+                    if not cond_map.get(op.type, False):
+                        self.output.append(f"    jmp {label_next}")
+                else:
+                    # choose left so it's register/memory
+                    if var_token.type == TokenType.NUMBER:
+                        left = rhs_val
+                        if rhs_info and rhs_info.type == TokenType.REGISTER:
+                            left = self.remap_reg(left)
+                        right = var
+                    else:
+                        left = var
+                        if var_token.type == TokenType.REGISTER:
+                            left = self.remap_reg(left)
+                        right = rhs_val
+
+                    self.output.append(f"    cmp {left}, {right}")
+                    try:
+                        jm2 = jump_map[op.type]
+                    except KeyError:
+                        raise SyntaxError(f"Line {op.line}: Unsupported comparison operator '{op.value}' in elif-statement")
+                    self.output.append(f"    {jm2} {label_next}")
                 
                 self.generate_block([TokenType.ELIF, TokenType.ELSE, TokenType.ENDIF])
                 self.output.append(f"    jmp {label_end}")
@@ -333,16 +407,48 @@ class CodeGenerator:
         self.output.append(f"; __GEN_START__ {block_id} {start_line}")
         self.advance()
         
-        var = self.current_token().value
+        # Support two syntaxes:
+        # 1) for <var> = <start>, <end>
+        # 2) for <var> <comparison-op> <operand>    (treated as start=0, end=<operand>)
+        var_token = self.current_token()
+        if not var_token:
+            raise SyntaxError(f"Line {self.current_token().line if self.current_token() else '?'}: Expected loop variable after 'for'")
+        var = var_token.value
         self.advance()
-        self.advance()  # =
-        
-        start = self.current_token().value
-        self.advance()
-        self.advance()  # ,
-        
-        end = self.current_token().value
-        self.advance()
+
+        # If next token is an assignment '=', parse start and end (old syntax)
+        next_tok = self.current_token()
+        if next_tok and next_tok.type == TokenType.ASSIGN:
+            # consume '='
+            self.advance()
+            # parse start operand (support numbers, identifiers, registers, or memory)
+            if self.current_token() and self.current_token().type in [TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER, TokenType.LBRACKET]:
+                start, _ = self.parse_operand()
+            else:
+                start = self.current_token().value if self.current_token() else '0'
+                self.advance()
+
+            # consume optional comma
+            if self.current_token() and self.current_token().type == TokenType.COMMA:
+                self.advance()
+
+            # parse end operand similarly
+            if self.current_token() and self.current_token().type in [TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER, TokenType.LBRACKET]:
+                end, _ = self.parse_operand()
+            else:
+                end = self.current_token().value if self.current_token() else '0'
+                self.advance()
+        else:
+            # Comparison-style: e.g. 'for r12d < dword [num_frames]'
+            if next_tok and next_tok.type in [TokenType.LT, TokenType.LE, TokenType.GT, TokenType.GE]:
+                # consume comparison operator
+                self.advance()
+                # parse the right-hand operand (could be memory/identifier/number/register)
+                end, _ = self.parse_operand()
+                # treat start as 0
+                start = '0'
+            else:
+                raise SyntaxError(f"Line {var_token.line}: Unsupported 'for' syntax; expected '=' or comparison operator after variable")
         self.skip_newlines()
         
         # allocate a callee-saved register for the loop variable to survive calls
@@ -357,15 +463,31 @@ class CodeGenerator:
             'continue': label_continue
         })
 
-        self.output.append(f"    mov {internal_reg}, {start}")
+        # If start/end use 32-bit sized memory (e.g. 'dword [...]'), prefer the
+        # 32-bit subregister (r12 -> r12d) to avoid operand-size mismatches.
+        def subreg32(r):
+            # r like 'r12' or 'rbx' -> 'r12d' or 'ebx'
+            if r.startswith('r') and r[1].isdigit():
+                return r + 'd'
+            if r.startswith('r'):
+                return 'e' + r[1:]
+            return r
+
+        loop_reg = internal_reg
+        if (isinstance(start, str) and 'dword' in start) or (isinstance(end, str) and 'dword' in end):
+            loop_reg = subreg32(internal_reg)
+
+        self.output.append(f"    mov {loop_reg}, {start}")
         self.output.append(f"{label_start}:")
-        self.output.append(f"    cmp {internal_reg}, {end}")
-        self.output.append(f"    jg {label_end}")
+        self.output.append(f"    cmp {loop_reg}, {end}")
+        # Use jge (jump if greater or equal) so the loop does not skip the
+        # final iteration when the loop variable equals the end value.
+        self.output.append(f"    jge {label_end}")
 
         self.generate_block([TokenType.ENDFOR])
 
         self.output.append(f"{label_continue}:")
-        self.output.append(f"    inc {internal_reg}")
+        self.output.append(f"    inc {loop_reg}")
         self.output.append(f"    jmp {label_start}")
         self.output.append(f"{label_end}:")
         
@@ -400,14 +522,15 @@ class CodeGenerator:
             raise SyntaxError(f"Line {op.line if op else '?'}: Expected comparison operator after '{var}' in while-statement")
         self.advance()
 
-        value_token = self.current_token()
-        if not value_token:
+        rhs_token = self.current_token()
+        if not rhs_token:
             raise SyntaxError(f"Line {op.line if op else '?'}: Expected value after comparison in while-statement")
-        if value_token.type == TokenType.NUMBER:
-            value = value_token.value
+        if rhs_token.type == TokenType.NUMBER:
+            rhs_val = rhs_token.value
             self.advance()
+            rhs_info = rhs_token
         else:
-            value, _ = self.parse_operand()
+            rhs_val, rhs_info = self.parse_operand()
         self.skip_newlines()
         
         label_start = self.get_label()
@@ -419,10 +542,35 @@ class CodeGenerator:
             'continue': label_continue
         })
 
-        var_m = self.remap_reg(var)
         self.output.append(f"{label_start}:")
         self.output.append(f"{label_continue}:")
-        self.output.append(f"    cmp {var_m}, {value}")
+
+        # If both sides are numeric, evaluate condition at compile-time.
+        if var_token.type == TokenType.NUMBER and (rhs_info and rhs_info.type == TokenType.NUMBER):
+            a = int(var)
+            b = int(rhs_val)
+            cond_map = {
+                TokenType.EQ: (a == b), TokenType.NE: (a != b),
+                TokenType.LT: (a < b), TokenType.GT: (a > b),
+                TokenType.LE: (a <= b), TokenType.GE: (a >= b)
+            }
+            if not cond_map.get(op.type, False):
+                # condition false => jump to end immediately
+                self.output.append(f"    jmp {label_end}")
+        else:
+            # ensure left operand is a register/memory for valid cmp
+            if var_token.type == TokenType.NUMBER:
+                left = rhs_val
+                if rhs_info and rhs_info.type == TokenType.REGISTER:
+                    left = self.remap_reg(left)
+                right = var
+            else:
+                left = var
+                if var_token.type == TokenType.REGISTER:
+                    left = self.remap_reg(left)
+                right = rhs_val
+
+            self.output.append(f"    cmp {left}, {right}")
 
         jump_map = {
             TokenType.EQ: 'jne', TokenType.NE: 'je',
