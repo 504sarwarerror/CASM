@@ -40,36 +40,23 @@ class Lexer:
                 i += 1
                 continue
 
-            # If this line starts a macro (%macro or macro) we want to preserve
-            # the header and footer exactly as ASM_LINE, but still tokenize the
-            # lines inside the macro so high-level constructs (if/endif, etc.)
-            # are processed by the compiler. This allows macros to contain
-            # high-level language features while keeping the macro directives
-            # intact.
-            lstripped = original_line.lstrip()
-            first_word = lstripped.split()[0].lower() if lstripped.split() else ''
-            if first_word.startswith('%'):
-                maybe = first_word[1:]
-            else:
-                maybe = first_word
-
-            if maybe == 'macro':
-                # emit the header as a raw ASM_LINE so the exact directive is
-                # preserved (we'll normalize to %macro later when writing out)
-                self.tokens.append(Token(TokenType.ASM_LINE, original_line, line_num))
-                # consume the header line and tokenize body lines until endmacro
-                i += 1
-                while i < total:
-                    inner_line = self.lines[i]
-                    inner_lstr = inner_line.strip().lower()
-                    # if this line is endmacro or %endmacro, emit as ASM_LINE
-                    if inner_lstr.startswith('endmacro') or inner_lstr.startswith('%endmacro'):
-                        self.tokens.append(Token(TokenType.ASM_LINE, inner_line, i + 1))
-                        i += 1
+            # Capture macro blocks as a single ASM_LINE token so the
+            # compiler preserves the entire macro definition verbatim.
+            if line.lower().startswith('macro'):
+                # gather lines until a line that starts with 'endmacro' (case-insensitive)
+                j = i
+                block_lines = []
+                while j < total:
+                    block_line = self.lines[j]
+                    block_lines.append(block_line)
+                    if block_line.strip().lower().startswith('endmacro'):
                         break
-                    # otherwise tokenize the inner line normally
-                    self.tokenize_line(inner_line, i + 1)
-                    i += 1
+                    j += 1
+                # join with newline to preserve original formatting
+                block_text = '\n'.join(block_lines)
+                self.tokens.append(Token(TokenType.ASM_LINE, block_text, line_num))
+                # advance past the captured block
+                i = j + 1
                 continue
 
             # otherwise continue normal handling for single line
