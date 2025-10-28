@@ -19,6 +19,7 @@ class TokenType(Enum):
     ENDFUNC = 12
     RETURN = 13
     CALL = 14
+    INCLUDE = 40
     VAR = 15
     LET = 16
     ASM_LINE = 17

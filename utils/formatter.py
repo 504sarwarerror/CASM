@@ -129,6 +129,40 @@ def format_and_merge(original: str, generated_helpers: List[str], gen_blocks: di
     """
     parts = collect_sections(original)
 
+    # Convert generated dot-prefixed labels (e.g. .L0) to NASM macro-local
+    # labels (%%L0) when they appear inside assembler macro blocks. This
+    # ensures that when generated assembly is inserted into a `%macro` /
+    # `macro` definition, labels are local to each macro expansion and do
+    # not collide across expansions.
+    def _convert_labels_in_macros(lines: list) -> list:
+        out = []
+        in_macro = False
+        for ln in lines:
+            s = ln.strip()
+            low = s.lower()
+            if low.startswith('%macro') or low.startswith('macro'):
+                in_macro = True
+                out.append(ln)
+                continue
+            if low.startswith('%endmacro') or low.startswith('endmacro'):
+                in_macro = False
+                out.append(ln)
+                continue
+
+            if in_macro:
+                # Replace occurrences of .L<number> (labels and references)
+                # with NASM macro-local %%L<number>. Use word-boundary to
+                # avoid accidental mid-token replacements.
+                ln = re.sub(r"\.L(\d+)\b", r"%%L\1", ln)
+            out.append(ln)
+        return out
+
+    # Convert labels in both preamble and text regions since macros may
+    # appear before any explicit `section .text` header (they're then
+    # collected into the preamble by `collect_sections`).
+    parts['text'] = _convert_labels_in_macros(parts['text'])
+    parts['preamble'] = _convert_labels_in_macros(parts['preamble'])
+
     # Strip comments from preamble and text (but keep generated blocks content intact)
     preamble = strip_comments(parts['preamble'])
     text = parts['text']
@@ -273,14 +307,37 @@ def format_and_merge(original: str, generated_helpers: List[str], gen_blocks: di
         """
         directives = {'if', 'elif', 'else', 'endif', 'for', 'endfor', 'while', 'endwhile', 'func', 'endfunc'}
         out = []
+        in_macro = False
         for ln in lines:
             s = ln.strip()
+
+            # Detect entry/exit of assembler macro blocks and preserve
+            # everything inside them. Macro directives may be written as
+            # "%macro" / "%endmacro" (NASM) or simply "macro" / "endmacro"
+            # depending on author style. We use a case-insensitive prefix
+            # check to avoid stripping DSL lines that are part of macros.
+            low = s.lower()
+            if low.startswith('%macro') or low.startswith('macro'):
+                in_macro = True
+                out.append(ln)
+                continue
+            if low.startswith('%endmacro') or low.startswith('endmacro'):
+                in_macro = False
+                out.append(ln)
+                continue
+
+            if in_macro:
+                # preserve macro body lines verbatim
+                out.append(ln)
+                continue
+
             if not s:
                 out.append(ln)
                 continue
+
             first = s.split()[0].lower()
             if first in directives:
-                # skip DSL directive lines
+                # skip DSL directive lines that are not inside macros
                 continue
             out.append(ln)
         return out

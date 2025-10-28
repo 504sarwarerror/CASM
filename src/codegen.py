@@ -66,6 +66,11 @@ class CodeGenerator:
                 self.advance()
             elif token.type == TokenType.NEWLINE:
                 self.advance()
+            elif token.type == TokenType.INCLUDE:
+                # Include directives are rewritten at the assembly-build stage
+                # to point to the generated files. Skip emitting an include here
+                # to avoid duplicate includes in the final output.
+                self.advance()
             else:
                 self.advance()
         
@@ -176,6 +181,25 @@ class CodeGenerator:
             while self.current_token() and self.current_token().type != TokenType.RBRACKET:
                 inner_tok = self.current_token()
                 # remap registers inside the expression
+                # Handle `%` macro-parameter token sequences like `%1` or `%ident`
+                # The lexer emits '%' as a separate MODULO token followed by a
+                # NUMBER/IDENTIFIER token; join them without a space so the
+                # assembler sees "%1" instead of "% 1" which is invalid.
+                if inner_tok.type == TokenType.MODULO:
+                    # peek next token
+                    next_pos = self.pos + 1
+                    next_tok = self.tokens[next_pos] if next_pos < len(self.tokens) else None
+                    if next_tok and next_tok.type in (TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER):
+                        parts.append('%' + str(next_tok.value))
+                        # consume both '%' and the following token
+                        self.advance()
+                        self.advance()
+                        continue
+                    else:
+                        parts.append(str(inner_tok.value))
+                        self.advance()
+                        continue
+
                 if inner_tok.type == TokenType.REGISTER:
                     parts.append(self.remap_reg(inner_tok.value))
                 else:
@@ -200,6 +224,20 @@ class CodeGenerator:
             parts = []
             while self.current_token() and self.current_token().type != TokenType.RBRACKET:
                 inner_tok = self.current_token()
+                # handle macro-param %n sequences as a single token
+                if inner_tok.type == TokenType.MODULO:
+                    next_pos = self.pos + 1
+                    next_tok = self.tokens[next_pos] if next_pos < len(self.tokens) else None
+                    if next_tok and next_tok.type in (TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER):
+                        parts.append('%' + str(next_tok.value))
+                        self.advance()
+                        self.advance()
+                        continue
+                    else:
+                        parts.append(str(inner_tok.value))
+                        self.advance()
+                        continue
+
                 if inner_tok.type == TokenType.REGISTER:
                     parts.append(self.remap_reg(inner_tok.value))
                 else:
@@ -546,6 +584,7 @@ class CodeGenerator:
         self.output.append(f"{label_continue}:")
 
         # If both sides are numeric, evaluate condition at compile-time.
+        cmp_emitted = False
         if var_token.type == TokenType.NUMBER and (rhs_info and rhs_info.type == TokenType.NUMBER):
             a = int(var)
             b = int(rhs_val)
@@ -571,6 +610,7 @@ class CodeGenerator:
                 right = rhs_val
 
             self.output.append(f"    cmp {left}, {right}")
+            cmp_emitted = True
 
         jump_map = {
             TokenType.EQ: 'jne', TokenType.NE: 'je',
@@ -582,7 +622,10 @@ class CodeGenerator:
             jm = jump_map[op.type]
         except KeyError:
             raise SyntaxError(f"Line {op.line}: Unsupported comparison operator '{op.value}' in while-statement")
-        self.output.append(f"    {jm} {label_end}")
+        # Only emit the conditional jump if we actually emitted a cmp; for
+        # constant-true loops we don't want a premature conditional branch.
+        if cmp_emitted:
+            self.output.append(f"    {jm} {label_end}")
         self.generate_block([TokenType.ENDWHILE])
         
         self.output.append(f"    jmp {label_start}")
@@ -722,6 +765,10 @@ class CodeGenerator:
                 self.generate_continue()
             elif token.type == TokenType.ASM_LINE:
                 self.output.append(token.value)
+                self.advance()
+            elif token.type == TokenType.INCLUDE:
+                # Skip here as well; original source will be rewritten to
+                # reference the generated file path by the compiler build step.
                 self.advance()
             elif token.type == TokenType.NEWLINE:
                 self.advance()

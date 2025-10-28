@@ -4,6 +4,8 @@ from libs.stdio import StandardLibrary
 from src.token import TokenType
 from .formatter import format_and_merge
 import os
+import re
+import pathlib
 
 
 class SyntaxChecker:
@@ -109,15 +111,69 @@ class Compiler:
         if self.verbose:
             print(message)
 
-    def compile(self):
+    def compile(self, _included=None):
         self.log(f"[*] Compiling {self.input_file}...")
 
+        # Track included files to avoid recursive inclusion loops.
+        if _included is None:
+            _included = set()
+
+        # Scan the source for include directives and compile included files
+        # before compiling this file. Supported forms (case-insensitive):
+        #   include "path"
+        #   include 'path'
+        #   %include path
+        # Paths are resolved relative to the including file's directory.
+        include_re = re.compile(r'''^\s*(?:%?include)\s+(?:"([^"]+)"|'([^']+)'|([^\s;]+))''', re.IGNORECASE)
         try:
             with open(self.input_file, 'r', encoding='utf-8') as f:
-                source = f.read()
+                raw_lines = f.read().splitlines()
         except FileNotFoundError:
             print(f"[!] Error: File '{self.input_file}' not found")
             return False
+        except Exception as e:
+            print(f"[!] Error reading file: {e}")
+            return False
+
+        includes_to_process = []
+        for ln in raw_lines:
+            m = include_re.match(ln)
+            if m:
+                path = m.group(1) or m.group(2) or m.group(3)
+                if path:
+                    # expand environment vars and user (~)
+                    path = os.path.expandvars(path)
+                    path = os.path.expanduser(path)
+                    includes_to_process.append(path)
+
+        for inc_path in includes_to_process:
+            # resolve relative to this file
+            if not os.path.isabs(inc_path):
+                inc_abspath = os.path.normpath(os.path.join(os.path.dirname(self.input_file), inc_path))
+            else:
+                inc_abspath = os.path.normpath(inc_path)
+
+            if inc_abspath in _included:
+                # already processed
+                continue
+
+            if not os.path.exists(inc_abspath):
+                print(f"[!] Included file not found: {inc_abspath}")
+                return False
+
+            _included.add(inc_abspath)
+            # compile included file and write its generated asm to the build dir
+            child_compiler = Compiler(inc_abspath, output_file=None, verbose=self.verbose)
+            # ensure child uses same included-set to avoid cycles
+            ok = child_compiler.compile(_included)
+            if not ok:
+                print(f"[!] Failed to compile included file: {inc_abspath}")
+                return False
+
+        # Re-open source to get the original content for tokenizing below
+        try:
+            with open(self.input_file, 'r', encoding='utf-8') as f:
+                source = f.read()
         except Exception as e:
             print(f"[!] Error reading file: {e}")
             return False
@@ -270,6 +326,40 @@ class Compiler:
                     new_lines.append(orig_lines[i-1])
                     i += 1
             processed_original = '\n'.join(new_lines).rstrip()
+
+        # Rewrite any include directives in the original to point to the
+        # generated file names (e.g. avatar.asm -> avatar-gen.asm).
+        # This ensures we don't keep the original include and a generated
+        # include side-by-side.
+        try:
+            include_re = re.compile(r'''^\s*(%?include)\s+(?:"([^"]+)"|'([^']+)'|([^\s;]+))''', re.IGNORECASE | re.MULTILINE)
+
+            def _rewrite(m):
+                directive = m.group(1) or 'include'
+                path = m.group(2) or m.group(3) or m.group(4) or ''
+                # compute the generated file path under the repo build/ directory
+                try:
+                    repo_root = os.getcwd()
+                    build_dir = os.path.join(repo_root, 'build')
+                    # basename of the original include (drop dirs)
+                    base_name = os.path.splitext(os.path.basename(path))[0]
+                    generated_abs = os.path.normpath(os.path.join(build_dir, f"{base_name}-gen.asm"))
+                    # emit absolute path so NASM can find it regardless of cwd
+                    new_path = generated_abs
+                except Exception:
+                    # fallback: preserve original behaviour but adjust basename
+                    dirpart, fname = os.path.split(path)
+                    base, ext = os.path.splitext(fname)
+                    new_fname = f"{base}-gen.asm"
+                    new_path = os.path.join(dirpart, new_fname) if dirpart else new_fname
+
+                # always emit with double-quotes and use the same directive token
+                return f"{directive} \"{new_path}\""
+
+            processed_original = include_re.sub(_rewrite, processed_original)
+        except Exception:
+            # non-fatal: if rewriting fails, fall back to the unmodified original
+            pass
 
         # Use formatter to produce final merged content
         deps = self.stdlib.get_dependencies(stdlib_used)

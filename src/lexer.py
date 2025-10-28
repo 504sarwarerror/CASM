@@ -27,20 +27,67 @@ class Lexer:
         }
     
     def tokenize(self):
-        for line_num, line in enumerate(self.lines, 1):
-            original_line = line
-            line = line.strip()
-            
+        i = 0
+        total = len(self.lines)
+        while i < total:
+            line_num = i + 1
+            original_line = self.lines[i]
+            line = original_line.strip()
+
+            # Preserve blank lines and pure-ASM/comment lines as ASM_LINE
             if not line or line.startswith(';'):
                 self.tokens.append(Token(TokenType.ASM_LINE, original_line, line_num))
+                i += 1
                 continue
+
+            # Capture macro blocks as a single ASM_LINE token so the
+            # compiler preserves the entire macro definition verbatim.
+            if line.lower().startswith('macro'):
+                # gather lines until a line that starts with 'endmacro' (case-insensitive)
+                j = i
+                block_lines = []
+                while j < total:
+                    block_line = self.lines[j]
+                    block_lines.append(block_line)
+                    if block_line.strip().lower().startswith('endmacro'):
+                        break
+                    j += 1
+                # join with newline to preserve original formatting
+                block_text = '\n'.join(block_lines)
+                self.tokens.append(Token(TokenType.ASM_LINE, block_text, line_num))
+                # advance past the captured block
+                i = j + 1
+                continue
+
+            # otherwise continue normal handling for single line
             
             first_word = line.split()[0].lower() if line.split() else ''
-            
+
+            # Handle include directives specially (e.g. %include "file.asm" or include file.asm)
+            if first_word in ('%include', 'include'):
+                # extract the rest of the line after the directive
+                rest = line[len(first_word):].strip()
+                # strip surrounding quotes if present
+                if rest.startswith('"') and rest.endswith('"'):
+                    path = rest[1:-1]
+                elif rest.startswith("'") and rest.endswith("'"):
+                    path = rest[1:-1]
+                else:
+                    # take the first token (unquoted path)
+                    path = rest.split()[0] if rest.split() else rest
+
+                self.tokens.append(Token(TokenType.INCLUDE, path, line_num, 0))
+                # preserve newline token for consistency
+                self.tokens.append(Token(TokenType.NEWLINE, '\n', line_num))
+                i += 1
+                continue
+
             if first_word in self.keywords:
                 self.tokenize_line(line, line_num)
+                i += 1
             else:
                 self.tokens.append(Token(TokenType.ASM_LINE, original_line, line_num))
+                i += 1
         
         self.tokens.append(Token(TokenType.EOF, None, len(self.lines) + 1))
         return self.tokens
