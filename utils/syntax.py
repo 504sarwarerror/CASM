@@ -363,6 +363,25 @@ class Compiler:
 
         # Use formatter to produce final merged content
         deps = self.stdlib.get_dependencies(stdlib_used)
+        # Normalize macro directives: convert `macro`/`endmacro` to NASM-style
+        # `%macro`/`%endmacro` so generated files are compatible with NASM.
+        try:
+            def _norm_macro_directives(text):
+                # Replace leading 'macro' with '%macro' and 'endmacro' with '%endmacro'
+                text = re.sub(r'(?m)^(\s*)macro\b', r"\1%macro", text, flags=re.IGNORECASE)
+                text = re.sub(r'(?m)^(\s*)endmacro\b', r"\1%endmacro", text, flags=re.IGNORECASE)
+                return text
+
+            processed_original = _norm_macro_directives(processed_original)
+            # Also normalize any generated-only lines collected in other_gen_lines
+            if other_gen_lines:
+                other_gen_text = '\n'.join(other_gen_lines)
+                other_gen_text = _norm_macro_directives(other_gen_text)
+                other_gen_lines = other_gen_text.splitlines()
+        except Exception:
+            # non-fatal - if normalization fails, fall back to unmodified content
+            pass
+
         final = format_and_merge(processed_original, other_gen_lines, gen_blocks, deps, data_section)
         return final
 

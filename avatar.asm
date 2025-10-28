@@ -39,7 +39,7 @@ global avatar_draw
 global avatar_free
 global avatar_idle
 
-%macro LOAD_IMAGE 2
+macro LOAD_IMAGE 2
     lea rcx, [%1]                
     call IMG_Load               
     if rax == 0
@@ -52,9 +52,9 @@ global avatar_idle
     mov [%2], rax                
     mov rcx, r15
     call SDL_FreeSurface         
-%endmacro
+endmacro
 
-%macro DRAW_IMAGE 3
+macro DRAW_IMAGE 3
     if [%1] == 1                  
         mov eax, [avatar_frame]    
         if eax == 0
@@ -72,7 +72,7 @@ global avatar_idle
             call SDL_RenderCopy
         endif
     endif
-%endmacro
+endmacro
 
 avatar_load:
     push rbp
