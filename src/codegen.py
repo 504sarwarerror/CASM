@@ -128,7 +128,13 @@ class CodeGenerator:
         return label
 
     def remap_reg(self, name):
-        return self.register_map.get(name, name)
+        # Support case-insensitive lookup for register mappings. The lexer
+        # may emit registers in different cases; prefer an exact match but
+        # fall back to a lowercase key if present.
+        if name in self.register_map:
+            return self.register_map[name]
+        lower = name.lower()
+        return self.register_map.get(lower, name)
 
     def allocate_reg_for(self, orig_name):
         # lazy-init appropriate register pool for 32/64-bit modes
@@ -139,15 +145,37 @@ class CodeGenerator:
         # find a free callee-saved register from the pool
         for r in self._reg_pool:
             if r not in self.register_map.values():
+                # store both the original and lowercase keys so later
+                # lookups (which may use different cases) succeed.
                 self.register_map[orig_name] = r
+                self.register_map[orig_name.lower()] = r
                 return r
         # fallback: reuse the first pool entry
         self.register_map[orig_name] = self._reg_pool[0]
+        self.register_map[orig_name.lower()] = self._reg_pool[0]
         return self._reg_pool[0]
     
     def skip_newlines(self):
         while self.current_token() and self.current_token().type == TokenType.NEWLINE:
             self.advance()
+
+    def remap_asm_line(self, line: str) -> str:
+        """Remap register identifiers inside a raw ASM line using current
+        register_map. This replaces whole-word occurrences of known register
+        names (case-insensitive) with their mapped names so loop counters
+        allocated to callee-saved regs (r12/r13 -> r12d/r13d) are used
+        inside emitted assembly lines.
+        """
+        import re
+
+        def repl(m):
+            tok = m.group(0)
+            mapped = self.remap_reg(tok)
+            return mapped
+
+        # Replace identifiers (words) only. This is conservative but works for
+        # typical assembly tokens like 'eax', 'ebx', 'r12', 'ecx', etc.
+        return re.sub(r"\b[A-Za-z][A-Za-z0-9]*\b", repl, line)
 
     def parse_operand(self):
         """Parse an operand which may be:
@@ -490,7 +518,28 @@ class CodeGenerator:
         self.skip_newlines()
         
         # allocate a callee-saved register for the loop variable to survive calls
-        internal_reg = self.allocate_reg_for(var)
+        # Prefer specific registers for nested loops to avoid conflicts:
+        # - outermost loop: r13 (-> r13d)
+        # - inner loop:      r15 (-> r15d)
+        internal_reg = None
+        loop_depth = len(self.loop_stack)  # 0 for outermost
+        if self.bits == 64:
+            preferred_by_depth = {
+                0: ('r13', 'r14', 'r12', 'r15', 'rbx'),
+                1: ('r15', 'r14', 'r13', 'r12', 'rbx')
+            }
+            prefs = preferred_by_depth.get(loop_depth, ('r12', 'r13', 'r14', 'r15', 'rbx'))
+            for pref in prefs:
+                if pref not in self.register_map.values():
+                    # reserve this register for the loop variable (store both
+                    # original and lowercase keys for lookup robustness)
+                    self.register_map[var] = pref
+                    self.register_map[var.lower()] = pref
+                    internal_reg = pref
+                    break
+        if internal_reg is None:
+            # fallback to normal allocation which will also register the mapping
+            internal_reg = self.allocate_reg_for(var)
 
         label_start = self.get_label()
         label_end = self.get_label()
@@ -511,9 +560,25 @@ class CodeGenerator:
                 return 'e' + r[1:]
             return r
 
-        loop_reg = internal_reg
-        if (isinstance(start, str) and 'dword' in start) or (isinstance(end, str) and 'dword' in end):
+        # Prefer the 32-bit subregister for loop counters when targeting
+        # x64. Loop counters are typically used with 32-bit arithmetic
+        # (mul/div with eax/edx, index calculations), so use r12d/r13d to
+        # avoid operand-size mismatches with instructions that operate on
+        # 32-bit registers (eax, edx, etc.). For 32-bit target keep the
+        # allocated register as-is.
+        if self.bits == 64:
             loop_reg = subreg32(internal_reg)
+        else:
+            loop_reg = internal_reg
+
+        # If we're using a 32-bit subregister for the loop counter (e.g. r12d)
+        # update the register map for the loop variable so subsequent uses of
+        # the variable inside the generated block will reference the same
+        # sized register (avoids falling back to ebx/ecx or mismatched names).
+        if loop_reg != internal_reg:
+            # Overwrite mapping to point to the subregister (r12d, r13d, etc.)
+            self.register_map[var] = loop_reg
+            self.register_map[var.lower()] = loop_reg
 
         self.output.append(f"    mov {loop_reg}, {start}")
         self.output.append(f"{label_start}:")
@@ -531,9 +596,11 @@ class CodeGenerator:
         
         self.loop_stack.pop()
         
-        # free mapping
+        # free mapping (remove both original and lowercase keys)
         if var in self.register_map:
             del self.register_map[var]
+        if var.lower() in self.register_map:
+            del self.register_map[var.lower()]
 
 
         # emit end marker
@@ -764,7 +831,10 @@ class CodeGenerator:
             elif token.type == TokenType.CONTINUE:
                 self.generate_continue()
             elif token.type == TokenType.ASM_LINE:
-                self.output.append(token.value)
+                # Remap register names inside raw ASM lines so that loop
+                # variables previously bound to callee-saved registers are
+                # used consistently in the emitted assembly.
+                self.output.append(self.remap_asm_line(token.value))
                 self.advance()
             elif token.type == TokenType.INCLUDE:
                 # Skip here as well; original source will be rewritten to
@@ -849,7 +919,10 @@ class CodeGenerator:
                         self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
                         self.output.append(f"    lea {reg_map[i]}, [rel {str_label}]")
                     elif arg.type in [TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER]:
-                        self.output.append(f"    mov {reg_map[i]}, {arg.value}")
+                        val = arg.value
+                        if arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
+                            val = self.remap_reg(arg.value)
+                        self.output.append(f"    mov {reg_map[i]}, {val}")
 
                 self.output.append(f"    call {func_name}")
             else:
@@ -959,7 +1032,10 @@ class CodeGenerator:
                         self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
                         self.output.append(f"    lea {reg_map[i]}, [rel {str_label}]")
                     elif arg.type in [TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER]:
-                        self.output.append(f"    mov {reg_map[i]}, {arg.value}")
+                        val = arg.value
+                        if arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
+                            val = self.remap_reg(arg.value)
+                        self.output.append(f"    mov {reg_map[i]}, {val}")
             self.output.append(f"    call _{func_name}")
         else:
             # 32-bit: push args right-to-left and call underscore-prefixed name
