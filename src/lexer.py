@@ -131,7 +131,15 @@ class Lexer:
                     raise SyntaxError(f"Line {line_num}: Unterminated string")
                 continue
             
-            # Numbers
+            # Numbers (support optional leading '+' or '-' so '-1', '-0xFF'
+            # and '-0b101' are tokenized as single NUMBER tokens). We only
+            # treat a leading sign as part of the number when it's directly
+            # followed by digits or a base prefix (0x/0b).
+            sign = ''
+            if line[i] in '+-' and (i + 1) < len(line) and (line[i+1].isdigit() or (line[i+1] == '0' and i+2 < len(line) and line[i+2] in 'xXbB')):
+                sign = line[i]
+                i += 1
+
             if line[i].isdigit() or (line[i] == '0' and i+1 < len(line) and line[i+1] in 'xXbB'):
                 j = i
                 if line[i] == '0' and i+1 < len(line):
@@ -149,8 +157,11 @@ class Lexer:
                 else:
                     while j < len(line) and line[j].isdigit():
                         j += 1
-                
-                self.tokens.append(Token(TokenType.NUMBER, line[i:j], line_num, i))
+
+                numtext = sign + line[i:j]
+                # token start index is adjusted back if there was a sign
+                start_idx = i - len(sign) if sign else i
+                self.tokens.append(Token(TokenType.NUMBER, numtext, line_num, start_idx))
                 i = j
                 continue
             

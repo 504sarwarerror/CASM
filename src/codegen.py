@@ -18,7 +18,9 @@ class CodeGenerator:
         # default to 64-bit generation; can be switched to 32-bit by
         # passing bits=32 when constructing CodeGenerator.
         self.bits = 64
-        self._reg_pool = ['r12', 'r13', 'r14', 'r15', 'rbx']
+        # prefer using the extended registers for temporary/callee-saved
+        # allocations so generated code can use r8..r15 (and their d subregs)
+        self._reg_pool = ['r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15', 'rbx']
     
     def generate(self):
         while self.pos < len(self.tokens):
@@ -479,6 +481,8 @@ class CodeGenerator:
         var_token = self.current_token()
         if not var_token:
             raise SyntaxError(f"Line {self.current_token().line if self.current_token() else '?'}: Expected loop variable after 'for'")
+        # Capture the raw token so we can detect register-specified loops
+        is_register_var = (var_token.type == TokenType.REGISTER)
         var = var_token.value
         self.advance()
 
@@ -518,27 +522,44 @@ class CodeGenerator:
         self.skip_newlines()
         
         # allocate a callee-saved register for the loop variable to survive calls
-        # Prefer specific registers for nested loops to avoid conflicts:
-        # - outermost loop: r13 (-> r13d)
-        # - inner loop:      r15 (-> r15d)
+        # If the user specified a register (e.g. `for r12 = ...`), try to
+        # reserve that specific register; otherwise choose from preferred
+        # pools depending on nesting depth so nested loops get different
+        # registers.
         internal_reg = None
         loop_depth = len(self.loop_stack)  # 0 for outermost
         if self.bits == 64:
-            preferred_by_depth = {
-                0: ('r13', 'r14', 'r12', 'r15', 'rbx'),
-                1: ('r15', 'r14', 'r13', 'r12', 'rbx')
-            }
-            prefs = preferred_by_depth.get(loop_depth, ('r12', 'r13', 'r14', 'r15', 'rbx'))
-            for pref in prefs:
-                if pref not in self.register_map.values():
-                    # reserve this register for the loop variable (store both
-                    # original and lowercase keys for lookup robustness)
-                    self.register_map[var] = pref
-                    self.register_map[var.lower()] = pref
-                    internal_reg = pref
-                    break
+            # preferred order by depth: prefer r8..r15 to keep registers
+            # available for manual use by the programmer
+            base_prefs = ('r8','r9','r10','r11','r12','r13','r14','r15','rbx')
+
+            # If the loop variable is a register name, try to use it
+            if is_register_var:
+                desired = var.lower()
+                # normalize names like 'r12d' -> 'r12'
+                if desired.endswith('d') and desired.startswith('r'):
+                    desired = desired[:-1]
+                # if desired is available in the register pool and not used,
+                # reserve it
+                if desired in base_prefs and desired not in self.register_map.values():
+                    internal_reg = desired
+                    self.register_map[var] = internal_reg
+                    self.register_map[var.lower()] = internal_reg
+
+            # If not reserved yet, pick a preferred one by loop depth to avoid
+            # nested conflicts
+            if internal_reg is None:
+                # rotate preferences by depth so nested loops choose different
+                prefs = tuple(base_prefs[loop_depth % len(base_prefs):] + base_prefs[:loop_depth % len(base_prefs)])
+                for pref in prefs:
+                    if pref not in self.register_map.values():
+                        self.register_map[var] = pref
+                        self.register_map[var.lower()] = pref
+                        internal_reg = pref
+                        break
+
         if internal_reg is None:
-            # fallback to normal allocation which will also register the mapping
+            # fallback: allocate from pool which also records mapping
             internal_reg = self.allocate_reg_for(var)
 
         label_start = self.get_label()
