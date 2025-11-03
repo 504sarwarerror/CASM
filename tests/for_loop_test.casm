@@ -1,3 +1,0 @@
-for ecx = dword [start], dword [end]
-    mov eax, ecx
-endfor

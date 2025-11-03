@@ -39,6 +39,7 @@ class CLI:
             'exe': False,
             'run': False,
             'verbose': False,
+            'debug': False,
             'target': 'windows',
             'ldflags': '',
             'help': False
@@ -91,6 +92,11 @@ class CLI:
             elif arg == '--run':
                 config['run'] = True
                 config['build'] = True
+                i += 1
+
+            elif arg == '--debug':
+                # Enable debug-friendly NASM output (emit DWARF/codeview info)
+                config['debug'] = True
                 i += 1
             
             elif arg in ['-v', '--verbose']:

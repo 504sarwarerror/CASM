@@ -37,7 +37,13 @@ def main():
     
     if config['build']:
         print()
-        builder = Builder(output_file, config['verbose'], target=config.get('target', 'windows'), linker_flags=config.get('ldflags', ''))
+        builder = Builder(
+            output_file,
+            config['verbose'],
+            target=config.get('target', 'windows'),
+            linker_flags=config.get('ldflags', ''),
+            debug=config.get('debug', False)
+        )
         
         if not builder.assemble_and_link():
             print("[!] Build failed")

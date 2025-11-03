@@ -5,12 +5,15 @@ import shlex
 
 
 class Builder:
-    def __init__(self, compiled_file, verbose=False, target='windows', linker_flags=''):
+    def __init__(self, compiled_file, verbose=False, target='windows', linker_flags='', debug=False):
         self.compiled_file = compiled_file
         self.verbose = verbose
         self.target = target  # 'windows', 'linux', 'macos'
         # linker_flags is a single string (e.g. "-L/path -lSDL2 -lSDL2main -mwindows")
         self.linker_flags = linker_flags or ''
+        # When debug=True, pass NASM debug flags (e.g. -gcv8 -F cv8) for richer
+        # debug info in the object file. Only meaningful for certain targets.
+        self.debug = bool(debug)
     
     def log(self, message):
         if self.verbose:
@@ -49,7 +52,13 @@ class Builder:
     def assemble_file(self, asm_file, obj_file):
         # Choose NASM output format based on target
         fmt = 'win64' if self.target == 'windows' else ('elf64' if self.target == 'linux' else 'macho64')
-        nasm_cmd = ['nasm', '-f', fmt, asm_file, '-o', obj_file]
+        # Build base command
+        nasm_cmd = ['nasm', '-f', fmt]
+        # If requested, add NASM debug flags for Windows (cv8) which produces
+        # CodeView debug information compatible with many Windows debuggers.
+        if self.debug and self.target == 'windows':
+            nasm_cmd.extend(['-gcv8', '-F', 'cv8'])
+        nasm_cmd.extend([asm_file, '-o', obj_file])
         
         try:
             result = subprocess.run(nasm_cmd, capture_output=True, text=True)
