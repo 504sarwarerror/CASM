@@ -127,7 +127,17 @@ class Builder:
                     extra = shlex.split(self.linker_flags)
                 except Exception:
                     extra = self.linker_flags.split()
+                # If debug requested, add -g so the final binary contains
+                # debug symbols and debuggers can locate source files.
+                if self.debug:
+                    # Place -g before user-supplied flags
+                    link_cmd.append('-g')
                 link_cmd.extend(extra)
+
+            else:
+                # No extra flags provided; still add -g if debug requested
+                if self.debug:
+                    link_cmd.append('-g')
 
             self.log(f"[*] Running linker: {' '.join(link_cmd)}")
             result = subprocess.run(link_cmd, capture_output=True, text=True)
