@@ -361,8 +361,25 @@ class Compiler:
             # non-fatal: if rewriting fails, fall back to the unmodified original
             pass
 
+        # Include any user-declared `extern <name>` from the original
+        # source as requests to pull in stdlib wrappers. This lets users
+        # write e.g. `extern rand` or `extern Sleep` to force the
+        # corresponding stdlib helper to be defined in the generated file
+        # even if the high-level call wasn't emitted by the codegen.
+        user_externs = set(re.findall(r'(?m)^\s*extern\s+([A-Za-z_][A-Za-z0-9_]*)', original))
+        # Only include stdlib wrappers when the user explicitly declares an
+        # `extern` for them. This prevents the compiler from auto-defining
+        # stdio helpers merely because a high-level `call` appeared in the
+        # generated code. If callers want the wrapper, they must write
+        # `extern <name>` in the source.
+        if user_externs:
+            combined_used = set(n.lower() for n in user_externs if isinstance(n, str))
+        else:
+            combined_used = set()
+
         # Use formatter to produce final merged content
-        deps = self.stdlib.get_dependencies(stdlib_used)
+        deps = self.stdlib.get_dependencies(combined_used)
+
         final = format_and_merge(processed_original, other_gen_lines, gen_blocks, deps, data_section)
         return final
 
