@@ -209,12 +209,22 @@ class Lexer:
                 word = line[i:j]
                 word_lower = word.lower()
                 
+                # Keywords
                 if word_lower in self.keywords:
                     self.tokens.append(Token(self.keywords[word_lower], word_lower, line_num, i))
-                elif word_lower in self.registers:
-                    self.tokens.append(Token(TokenType.REGISTER, word, line_num, i))
                 else:
-                    self.tokens.append(Token(TokenType.IDENTIFIER, word, line_num, i))
+                    # Register names: accept base registers like 'r12' and
+                    # 32-bit subregister forms like 'r12d'. Many users will
+                    # write 'r12d' when they want the 32-bit subregister; the
+                    # lexer should treat these as registers so later codegen
+                    # can handle mapping correctly.
+                    if word_lower in self.registers:
+                        self.tokens.append(Token(TokenType.REGISTER, word, line_num, i))
+                    elif word_lower.endswith('d') and word_lower[:-1] in self.registers:
+                        # e.g. 'r12d' -> base 'r12' is a known register
+                        self.tokens.append(Token(TokenType.REGISTER, word, line_num, i))
+                    else:
+                        self.tokens.append(Token(TokenType.IDENTIFIER, word, line_num, i))
                 
                 i = j
                 continue
