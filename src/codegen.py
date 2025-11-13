@@ -1,4 +1,4 @@
-from src.token import TokenType
+from src.token import TokenType, Token
 
 
 class CodeGenerator:
@@ -321,10 +321,27 @@ class CodeGenerator:
         if not rhs_token:
             raise SyntaxError(f"Line {op.line if op else '?'}: Expected value after comparison in if-statement")
 
+        # Support string literal RHS in comparisons. Common case: compare
+        # a single-byte register (e.g. al) to a single-character string like
+        # "." — treat that as comparing to the character's ASCII code.
         if rhs_token.type == TokenType.NUMBER:
             rhs_val = rhs_token.value
             self.advance()
             rhs_tok_info = rhs_token = rhs_token
+        elif rhs_token.type == TokenType.STRING:
+            s = rhs_token.value
+            # single-character string: convert to its ASCII numeric value so
+            # register comparisons (cmp al, 46) work correctly
+            if var_token and var_token.type == TokenType.REGISTER and len(s) == 1:
+                rhs_val = str(ord(s))
+                # craft a NUMBER-like token so later checks treat it as immediate
+                rhs_tok_info = Token(TokenType.NUMBER, rhs_val, rhs_token.line)
+                # consume the string token
+                self.advance()
+            else:
+                # Other string comparisons are not supported in this simple
+                # compiler stage (would require runtime string-compare).
+                raise SyntaxError(f"Line {rhs_token.line}: String comparisons other than single-character literals against registers are not supported")
         else:
             rhs_val, rhs_tok_info = self.parse_operand()
 
@@ -411,6 +428,14 @@ class CodeGenerator:
                     rhs_val = rhs_token.value
                     self.advance()
                     rhs_info = rhs_token
+                elif rhs_token.type == TokenType.STRING:
+                    s = rhs_token.value
+                    if var_token and var_token.type == TokenType.REGISTER and len(s) == 1:
+                        rhs_val = str(ord(s))
+                        rhs_info = Token(TokenType.NUMBER, rhs_val, rhs_token.line)
+                        self.advance()
+                    else:
+                        raise SyntaxError(f"Line {rhs_token.line}: String comparisons other than single-character literals against registers are not supported")
                 else:
                     rhs_val, rhs_info = self.parse_operand()
                 self.skip_newlines()
