@@ -86,7 +86,19 @@ section .text    ; Assembly code and high-level constructs
 
 ## High-Level Constructs
 
-### 1. Printing & I/O
+### 1. Overview
+
+This compiler exposes a small set of high-level control-flow constructs while allowing raw NASM lines to pass through unchanged. The high-level constructs are intentionally simple and operate on registers, immediates, identifiers and simple memory operands.
+
+Key rules:
+
+- Operands may be registers (e.g. `rax`, `al`), identifiers (labels/variables), numeric immediates, memory expressions (`[ident]` or `dword [ident]`), or string literals (quoted).
+- String literals are emitted into the `.data` section as generated labels when used as arguments to stdlib functions (e.g. `call print "Hello"`).
+- Comparisons support immediates and register/memory operands. A small convenience: comparing a single-character string literal to a byte-sized register (e.g. `if al == "."`) is supported — the compiler converts `"."` to the ASCII immediate `46` so the emitted `cmp` is valid.
+
+### 2. Printing & I/O
+
+Use the high-level `call` form to invoke runtime I/O helpers.
 
 ```nasm
 ; Print without newline
@@ -102,9 +114,31 @@ call println rax
 call println
 ```
 
-### 2. Control Flow
+Notes:
 
-#### If/Elif/Else
+- When you pass a string literal the compiler creates a data label and loads its address for you.
+- When you pass a register or identifier the compiler moves the value into the appropriate calling-register before invoking the helper.
+
+### 3. Control Flow (if / elif / else)
+
+Syntax:
+
+```nasm
+if <left> <comp> <right>
+    ; true block
+elif <left> <comp> <right>
+    ; elif block
+else
+    ; else block
+endif
+```
+
+Where:
+
+- `<left>` / `<right>` are operands: registers, identifiers, numbers, or (in some cases) string literals.
+- `<comp>` is one of: `==`, `!=`, `<`, `>`, `<=`, `>=`.
+
+Examples:
 
 ```nasm
 if rax == 0
@@ -114,54 +148,105 @@ elif rax == 1
 else
     call println "other"
 endif
+
+; Single-character string comparison against a byte register
+if al == "."
+    ; this is treated as `cmp al, 46` ('.' == 46)
+endif
 ```
 
-**Supported operators**: `==`, `!=`, `<`, `>`, `<=`, `>=`
+Behavior details:
 
-#### For Loops
+- If both sides are numeric immediates (e.g. `if 1 == 0`) the compiler evaluates the condition at compile-time and may elide the branch.
+- If one side is a register or memory operand the compiler emits a `cmp` followed by an appropriate conditional jump.
+- Multi-character string comparisons are not supported by emitting a direct `cmp` to immediates — they require a runtime string-compare helper. See the "String comparisons" note below.
 
-Inclusive range loops:
+String comparisons:
+
+- Only single-character string literals compared to a register are automatically converted to their ASCII numeric value.
+- Comparing two strings (or a multi-character literal against a buffer/identifier) requires a runtime helper such as `strcmp`. You can call such helpers from high-level code, but you must ensure the helper is available (see "Stdlib & externs" below).
+
+### 4. For Loops
+
+Syntax (inclusive-range):
 
 ```nasm
-for rcx = 1, 5
-    call println rcx
+for <var> = <start>, <end>
+    ; loop body
 endfor
 ```
 
-The loop variable is assigned a register internally to survive function calls.
+Alternative comparison-style:
 
-#### While Loops
+```nasm
+for <var> <comp> <operand>
+    ; treated as start=0, end=<operand>
+endfor
+```
+
+Examples:
+
+```nasm
+for rcx = 1, 3
+    call println rcx
+endfor
+
+; Using a specific register name (try to request r12d as loop counter)
+for r12d = 0, [n_vis_tiles_x]
+    ; loop body
+endfor
+```
+
+Register allocation notes:
+
+- The compiler will try to reserve the register you specify (e.g. `r12d`) when possible. If the requested register is unavailable because the compiler already used it for other mappings, the allocator will choose an alternative callee-saved register (e.g. `r9d`). If you require strict use of a particular register, avoid conflicting uses elsewhere in the function or use raw assembly lines to manage registers explicitly.
+- By default the compiler prefers callee-saved registers (r8..r15, rbx) for loop counters so they survive function calls inside the loop body.
+
+### 5. While Loops
+
+Syntax:
+
+```nasm
+while <left> <comp> <right>
+    ; loop body
+endwhile
+```
+
+Example:
 
 ```nasm
 while rbx > 0
-    ; loop body
     dec rbx
 endwhile
 ```
 
-#### Loop Control
+The same operand and comparison rules from `if` apply to `while`.
+
+### 6. Loop Control
+
+Inside loops you may use:
 
 ```nasm
 break       ; Exit the loop immediately
 continue    ; Skip to next iteration
 ```
 
-### 3. Variables & Registers
+These keywords are validated by the compiler and generate the appropriate jumps.
 
-- The language expects you to use **registers** for storage (`rax`, `rbx`, `rcx`, etc.)
-- High-level constructs automatically manage value movement between registers and temporaries
-- No explicit variable declaration needed - registers are your variables
+### 7. Variables & Registers
 
-### 4. Inline Assembly
+- Use registers as your primary storage (`rax`, `rbx`, `rcx`, `al`, `r12d`, ...).
+- The compiler performs simple register allocation for loop variables and function parameters; for predictable register usage prefer explicit raw assembly where needed.
 
-Any line not recognized as a high-level keyword is passed through verbatim:
+### 8. Inline Assembly
+
+Any line not recognized as a high-level keyword is passed through verbatim. This lets you drop down to raw NASM for performance-sensitive code.
 
 ```nasm
 section .text
     mov rax, 5          ; Raw NASM instruction
     add rax, rbx        ; Another raw instruction
-    ; Mix with high-level constructs
-    call println rax
+    call println rax    ; High-level call
 ```
 
 ## Standard Library
@@ -176,6 +261,20 @@ The compiler automatically injects only the standard library routines you actual
 | `println` | Print string/value with newline    |
 | `scan`    | Read string input                  |
 | `scanint` | Read integer input                 |
+
+Important: including stdlib helper implementations in the generated asm
+file requires an explicit `extern` declaration in your source. For
+example, to ensure the `print` helper is defined in the output, add this
+near the top of your file:
+
+```nasm
+extern print
+extern println
+```
+
+This repository's build step only emits stdlib wrapper implementations when
+the user explicitly declares them with `extern`. This avoids auto-defining
+library stubs unexpectedly when analyzing multiple sources or included files.
 
 ### String Functions
 
