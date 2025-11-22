@@ -2,6 +2,7 @@ import subprocess
 import shutil
 import os
 import shlex
+from utils.cli import CLI
 
 
 class Builder:
@@ -17,11 +18,9 @@ class Builder:
     
     def log(self, message):
         if self.verbose:
-            print(message)
+            CLI.info(message)
     
     def assemble_and_link(self):
-        print(f"[*] Building executable from {self.compiled_file}...")
-        
         obj_ext = '.obj' if self.target == 'windows' else '.o'
         exe_ext = '.exe' if self.target == 'windows' else ''
 
@@ -35,18 +34,16 @@ class Builder:
         obj_file = base_no_gen + obj_ext
         exe_file = base_no_gen + exe_ext
         
-        self.log(f"[*] Assembling {self.compiled_file}...")
-        if not self.assemble_file(self.compiled_file, obj_file):
-            return False
+        with CLI.spinner(f"Building {os.path.basename(exe_file)}..."):
+            self.log(f"Assembling {self.compiled_file}...")
+            if not self.assemble_file(self.compiled_file, obj_file):
+                return False
+            
+            self.log(f"Linking {exe_file}...")
+            if not self.link_files(obj_file, exe_file):
+                return False
         
-        print(f"[+] Assembled: {obj_file}")
-        
-        self.log(f"[*] Linking {exe_file}...")
-        if not self.link_files(obj_file, exe_file):
-            return False
-        
-        print(f"[+] Executable created: {exe_file}")
-        print(f"[+] Build successful!")
+        CLI.success(f"Built {os.path.basename(exe_file)}")
         return True
     
     def assemble_file(self, asm_file, obj_file):
@@ -64,19 +61,19 @@ class Builder:
             result = subprocess.run(nasm_cmd, capture_output=True, text=True)
             
             if result.returncode != 0:
-                print(f"[!] NASM assembly failed:")
+                CLI.error("NASM assembly failed:")
                 print(result.stderr)
                 return False
             
             return True
         
         except FileNotFoundError:
-            print("[!] Error: NASM not found!")
+            CLI.error("NASM not found!")
             print("    Install from: https://www.nasm.us/")
             return False
         
         except Exception as e:
-            print(f"[!] Assembly error: {e}")
+            CLI.error(f"Assembly error: {e}")
             return False
     
     def link_files(self, obj_file, exe_file):
@@ -91,10 +88,10 @@ class Builder:
                     # Fallback to host gcc (may fail to produce a Win32 exe on non-Windows hosts)
                     host_gcc = shutil.which('gcc')
                     if host_gcc:
-                        print("[!] Warning: mingw-w64 cross-compiler not found. Trying host gcc (may fail).")
+                        CLI.warning("mingw-w64 cross-compiler not found. Trying host gcc (may fail).")
                         link_cmd = [host_gcc, obj_file, '-o', exe_file, '-m64']
                     else:
-                        print("[!] Error: No suitable GCC found to link Windows executable.")
+                        CLI.error("No suitable GCC found to link Windows executable.")
                         print("    Install mingw-w64 on macOS: brew install mingw-w64 nasm")
                         return False
 
@@ -104,7 +101,7 @@ class Builder:
                 if host_gcc:
                     link_cmd = [host_gcc, obj_file, '-o', exe_file]
                 else:
-                    print("[!] Error: GCC not found for linking Linux executable.")
+                    CLI.error("GCC not found for linking Linux executable.")
                     print("    Install GCC (e.g., brew install gcc or apt install build-essential)")
                     return False
 
@@ -114,11 +111,11 @@ class Builder:
                 if host_clang:
                     link_cmd = [host_clang, obj_file, '-o', exe_file]
                 else:
-                    print("[!] Error: clang/gcc not found for linking macOS executable.")
+                    CLI.error("clang/gcc not found for linking macOS executable.")
                     return False
 
             else:
-                print(f"[!] Unsupported target: {self.target}")
+                CLI.error(f"Unsupported target: {self.target}")
                 return False
 
             # If user provided extra linker flags, split them safely and append
@@ -139,11 +136,11 @@ class Builder:
                 if self.debug:
                     link_cmd.append('-g')
 
-            self.log(f"[*] Running linker: {' '.join(link_cmd)}")
+            self.log(f"Running linker: {' '.join(link_cmd)}")
             result = subprocess.run(link_cmd, capture_output=True, text=True)
 
             if result.returncode != 0:
-                print(f"[!] Linking failed:")
+                CLI.error("Linking failed:")
                 if result.stderr:
                     print(result.stderr)
                 if result.stdout:
@@ -156,7 +153,7 @@ class Builder:
             return True
 
         except Exception as e:
-            print(f"[!] Linking error: {e}")
+            CLI.error(f"Linking error: {e}")
             return False
     
     def run_executable(self):
@@ -169,18 +166,18 @@ class Builder:
         exe_file = base_no_gen + ('.exe' if self.target == 'windows' else '')
 
         if exe_file and not os.path.exists(exe_file):
-            print(f"[!] Executable not found: {exe_file}")
+            CLI.error(f"Executable not found: {exe_file}")
             return False
         
-        print(f"[*] Running {exe_file}...")
+        CLI.info(f"Running {exe_file}...")
         print("=" * 50)
         
         try:
             result = subprocess.run([exe_file], capture_output=False)
             print("=" * 50)
-            print(f"[*] Program exited with code: {result.returncode}")
+            CLI.info(f"Program exited with code: {result.returncode}")
             return True
         
         except Exception as e:
-            print(f"[!] Runtime error: {e}")
+            CLI.error(f"Runtime error: {e}")
             return False

@@ -30,13 +30,13 @@ def main():
     )
     
     if not compiler.compile():
-        print("[!] Compilation failed")
+        CLI.error("Compilation failed")
         sys.exit(1)
     
     output_file = compiler.get_output_file()
     
     if config['build']:
-        print()
+
         builder = Builder(
             output_file,
             config['verbose'],
@@ -46,13 +46,13 @@ def main():
         )
         
         if not builder.assemble_and_link():
-            print("[!] Build failed")
+            CLI.error("Build failed")
             sys.exit(1)
         
         if config['run']:
             print()
             if not builder.run_executable():
-                print("[!] Execution failed")
+                CLI.error("Execution failed")
                 sys.exit(1)
     
     sys.exit(0)

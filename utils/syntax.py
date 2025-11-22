@@ -3,6 +3,7 @@ from src.codegen import CodeGenerator
 from libs.stdio import StandardLibrary
 from src.token import TokenType
 from .formatter import format_and_merge
+from .cli import CLI
 import os
 import re
 import pathlib
@@ -109,10 +110,10 @@ class Compiler:
 
     def log(self, message):
         if self.verbose:
-            print(message)
+            CLI.info(message)
 
     def compile(self, _included=None):
-        self.log(f"[*] Compiling {self.input_file}...")
+        # CLI.step(f"Compiling {self.input_file}...") # Removed, spinner handles this
 
         # Track included files to avoid recursive inclusion loops.
         if _included is None:
@@ -129,10 +130,10 @@ class Compiler:
             with open(self.input_file, 'r', encoding='utf-8') as f:
                 raw_lines = f.read().splitlines()
         except FileNotFoundError:
-            print(f"[!] Error: File '{self.input_file}' not found")
+            CLI.error(f"File '{self.input_file}' not found")
             return False
         except Exception as e:
-            print(f"[!] Error reading file: {e}")
+            CLI.error(f"Error reading file: {e}")
             return False
 
         includes_to_process = []
@@ -158,7 +159,7 @@ class Compiler:
                 continue
 
             if not os.path.exists(inc_abspath):
-                print(f"[!] Included file not found: {inc_abspath}")
+                CLI.error(f"Included file not found: {inc_abspath}")
                 return False
 
             _included.add(inc_abspath)
@@ -167,7 +168,7 @@ class Compiler:
             # ensure child uses same included-set to avoid cycles
             ok = child_compiler.compile(_included)
             if not ok:
-                print(f"[!] Failed to compile included file: {inc_abspath}")
+                CLI.error(f"Failed to compile included file: {inc_abspath}")
                 return False
 
         # Re-open source to get the original content for tokenizing below
@@ -175,65 +176,66 @@ class Compiler:
             with open(self.input_file, 'r', encoding='utf-8') as f:
                 source = f.read()
         except Exception as e:
-            print(f"[!] Error reading file: {e}")
+            CLI.error(f"Error reading file: {e}")
             return False
 
-        self.log("[*] Tokenizing source code...")
-        try:
-            lexer = Lexer(source)
-            tokens = lexer.tokenize()
-            self.log(f"    Generated {len(tokens)} tokens")
-        except SyntaxError as e:
-            print(f"[!] Lexer error: {e}")
-            return False
-        except Exception as e:
-            print(f"[!] Unexpected lexer error: {e}")
-            return False
-
-        self.log("[*] Checking syntax...")
-        try:
-            checker = SyntaxChecker(tokens)
-            errors = checker.check()
-
-            if errors:
-                print("[!] Syntax errors found:")
-                for error in errors:
-                    print(f"    {error}")
+        with CLI.spinner(f"Compiling {os.path.basename(self.input_file)}..."):
+            self.log("Tokenizing source code...")
+            try:
+                lexer = Lexer(source)
+                tokens = lexer.tokenize()
+                self.log(f"    Generated {len(tokens)} tokens")
+            except SyntaxError as e:
+                CLI.error(f"Lexer error: {e}")
+                return False
+            except Exception as e:
+                CLI.error(f"Unexpected lexer error: {e}")
                 return False
 
-            self.log("    Syntax OK")
-        except Exception as e:
-            print(f"[!] Syntax checker error: {e}")
-            return False
+            self.log("Checking syntax...")
+            try:
+                checker = SyntaxChecker(tokens)
+                errors = checker.check()
 
-        self.log("[*] Generating assembly code...")
-        try:
-            codegen = CodeGenerator(tokens)
-            generated_code, data_section, stdlib_used = codegen.generate()
-            self.log(f"    Generated {len(generated_code.split(chr(10)))} lines")
-            self.log(f"    Using stdlib functions: {', '.join(stdlib_used) if stdlib_used else 'none'}")
-        except Exception as e:
-            print(f"[!] Code generation error: {e}")
-            import traceback
-            traceback.print_exc()
-            return False
+                if errors:
+                    CLI.error("Syntax errors found:")
+                    for error in errors:
+                        print(f"    {error}")
+                    return False
 
-        self.log("[*] Building final assembly file...")
-        try:
-            output = self.build_assembly(generated_code, data_section, stdlib_used)
-        except Exception as e:
-            print(f"[!] Assembly building error: {e}")
-            return False
+                self.log("    Syntax OK")
+            except Exception as e:
+                CLI.error(f"Syntax checker error: {e}")
+                return False
 
-        try:
-            with open(self.output_file, 'w', encoding='utf-8') as f:
-                f.write(output)
-            self.log(f"[+] Compilation successful: {self.output_file}")
-            print(f"[+] Successfully compiled to: {self.output_file}")
-        except Exception as e:
-            print(f"[!] Error writing output file: {e}")
-            return False
+            self.log("Generating assembly code...")
+            try:
+                codegen = CodeGenerator(tokens)
+                generated_code, data_section, stdlib_used = codegen.generate()
+                self.log(f"    Generated {len(generated_code.split(chr(10)))} lines")
+                self.log(f"    Using stdlib functions: {', '.join(stdlib_used) if stdlib_used else 'none'}")
+            except Exception as e:
+                CLI.error(f"Code generation error: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
 
+            self.log("Building final assembly file...")
+            try:
+                output = self.build_assembly(generated_code, data_section, stdlib_used)
+            except Exception as e:
+                CLI.error(f"Assembly building error: {e}")
+                return False
+
+            try:
+                with open(self.output_file, 'w', encoding='utf-8') as f:
+                    f.write(output)
+                self.log(f"Compilation successful: {self.output_file}")
+            except Exception as e:
+                CLI.error(f"Error writing output file: {e}")
+                return False
+        
+        CLI.success(f"Compiled {os.path.basename(self.input_file)}")
         return True
 
     def build_assembly(self, code_lines, data_section, stdlib_used):

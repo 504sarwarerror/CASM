@@ -1,32 +1,122 @@
+import sys
+import time
+import threading
+import itertools
+
+class Colors:
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    ENDC = '\033[0m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    GREY = '\033[90m'
+    MAGENTA = '\033[35m'
+
+class Spinner:
+    def __init__(self, message="Processing...", delay=0.1):
+        self.spinner = itertools.cycle(['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'])
+        self.delay = delay
+        self.busy = False
+        self.spinner_visible = False
+        self.message = message
+        sys.stdout.write(f"{Colors.CYAN}  {message} {Colors.ENDC}")
+        sys.stdout.flush()
+
+    def write_next(self):
+        with self._screen_lock:
+            if not self.spinner_visible:
+                sys.stdout.write(next(self.spinner))
+                self.spinner_visible = True
+                sys.stdout.flush()
+
+    def remove_spinner(self, cleanup=False):
+        with self._screen_lock:
+            if self.spinner_visible:
+                sys.stdout.write('\b')
+                self.spinner_visible = False
+                if cleanup:
+                    sys.stdout.write(' ')       # overwrite spinner with blank
+                    sys.stdout.write('\r')      # return to start of line, NOT \n
+                sys.stdout.flush()
+
+    def spinner_task(self):
+        while self.busy:
+            self.write_next()
+            time.sleep(self.delay)
+            self.remove_spinner()
+
+    def __enter__(self):
+        self._screen_lock = threading.Lock()
+        self.busy = True
+        self.thread = threading.Thread(target=self.spinner_task)
+        self.thread.start()
+        return self
+
+    def __exit__(self, exception, value, tb):
+        self.busy = False
+        self.remove_spinner(cleanup=True)
+        self.thread.join()
+        # Clear the line
+        sys.stdout.write('\r' + ' ' * (len(self.message) + 10) + '\r')
+        sys.stdout.flush()
+        if exception:
+            return False
+
 class CLI:
     @staticmethod
     def print_banner():
-        print("=" * 60)
-        print("  Advanced Assembly Compiler v2.0")
-        print("  High-level constructs for NASM (Windows x64)")
-        print("  With dynamic standard library injection")
-        print("=" * 60)
+        print()
+        print(f"  {Colors.BOLD}{Colors.MAGENTA}CASM{Colors.ENDC} {Colors.GREY}v2.0{Colors.ENDC}")
+        print(f"  {Colors.GREY}Advanced Assembly Compiler{Colors.ENDC}")
         print()
     
     @staticmethod
     def print_usage():
-        print("Usage: casm <input.asm> [options]")
+        print(f"{Colors.BOLD}Usage:{Colors.ENDC} {Colors.GREEN}casm{Colors.ENDC} {Colors.YELLOW}<input.asm>{Colors.ENDC} [options]")
         print()
-        print("Options:")
-        print("  -o <file>      Specify output file")
-        print("  -e, --exe      Compile directly to .exe")
-        print("  --build        Assemble and link to executable")
-        print("  --target <t>   Target OS: windows (only 'windows' is supported)")
-        print("  --run          Run after building")
-        print("  -v, --verbose  Verbose output")
-        print("  -h, --help     Show help")
+        print(f"{Colors.BOLD}Options:{Colors.ENDC}")
+        print(f"  {Colors.GREEN}-o <file>{Colors.ENDC}      Specify output file")
+        print(f"  {Colors.GREEN}-e, --exe{Colors.ENDC}      Compile directly to .exe")
+        print(f"  {Colors.GREEN}--build{Colors.ENDC}        Assemble and link to executable")
+        print(f"  {Colors.GREEN}--target <t>{Colors.ENDC}   Target OS: windows (only 'windows' is supported)")
+        print(f"  {Colors.GREEN}--run{Colors.ENDC}          Run after building")
+        print(f"  {Colors.GREEN}-v, --verbose{Colors.ENDC}  Verbose output")
+        print(f"  {Colors.GREEN}-h, --help{Colors.ENDC}     Show help")
         print()
-        print("Examples:")
-        print("  casm program.asm")
-        print("  casm program.asm --build")
-        print("  casm program.asm --exe --run")
-        print("  casm program.asm -o output.asm -v")
+        print(f"{Colors.BOLD}Examples:{Colors.ENDC}")
+        print(f"  {Colors.CYAN}casm program.asm{Colors.ENDC}")
+        print(f"  {Colors.CYAN}casm program.asm --build{Colors.ENDC}")
+        print(f"  {Colors.CYAN}casm program.asm --exe --run{Colors.ENDC}")
+        print(f"  {Colors.CYAN}casm program.asm -o output.asm -v{Colors.ENDC}")
     
+    @staticmethod
+    def error(msg):
+        print(f"\r  {Colors.RED}✖{Colors.ENDC} {msg}")
+
+    @staticmethod
+    def warning(msg):
+        print(f"\r  {Colors.YELLOW}⚠{Colors.ENDC} {msg}")
+
+    @staticmethod
+    def success(msg):
+        print(f"\r  {Colors.GREEN}✔{Colors.ENDC} {msg}")
+
+    @staticmethod
+    def info(msg):
+        print(f"\r  {Colors.BLUE}ℹ{Colors.ENDC} {msg}")
+    
+    @staticmethod
+    def step(msg):
+        print(f"\r  {Colors.CYAN}→{Colors.ENDC} {msg}")
+
+    @staticmethod
+    def spinner(message):
+        return Spinner(message)
+
     @staticmethod
     def parse_args(args):
         if len(args) < 2:
@@ -58,7 +148,7 @@ class CLI:
                     config['output_file'] = args[i + 1]
                     i += 2
                 else:
-                    print("[!] Error: -o requires filename")
+                    CLI.error("-o requires filename")
                     return None
             
             elif arg in ['-e', '--exe', '--e']:
@@ -70,11 +160,11 @@ class CLI:
                 if i + 1 < len(args):
                     requested = args[i + 1].lower()
                     if requested != 'windows':
-                        print(f"[!] Warning: only 'windows' target is supported. Forcing target to 'windows'.")
+                        CLI.warning("only 'windows' target is supported. Forcing target to 'windows'.")
                     config['target'] = 'windows'
                     i += 2
                 else:
-                    print("[!] Error: --target requires a value (windows)")
+                    CLI.error("--target requires a value (windows)")
                     return None
             elif arg == '--ldflags':
                 # Accept a single string containing linker flags (quote as needed)
@@ -82,7 +172,7 @@ class CLI:
                     config['ldflags'] = args[i + 1]
                     i += 2
                 else:
-                    print("[!] Error: --ldflags requires a quoted string of flags (e.g. '-L/path -lSDL2')")
+                    CLI.error("--ldflags requires a quoted string of flags (e.g. '-L/path -lSDL2')")
                     return None
             
             elif arg == '--build':
@@ -109,11 +199,11 @@ class CLI:
                 i += 1
             
             else:
-                print(f"[!] Unknown option: {arg}")
+                CLI.warning(f"Unknown option: {arg}")
                 return None
         
         if not config['input_file']:
-            print("[!] Error: No input file specified")
+            CLI.error("No input file specified")
             return None
         
         return config
