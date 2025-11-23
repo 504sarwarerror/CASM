@@ -278,6 +278,8 @@ class Compiler:
         marker = '; Compiler-generated additions'
         if original and marker in original:
             original = original.split(marker, 1)[0].rstrip()
+        
+
 
         # Parse generated code blocks (if any) emitted by the code generator.
         # Blocks are delimited by markers written into `code_lines`:
@@ -412,7 +414,7 @@ class Compiler:
         # Use formatter to produce final merged content
         deps = self.stdlib.get_dependencies(combined_used)
 
-        final = format_and_merge(processed_original, other_gen_lines, gen_blocks, deps, data_section)
+        final = format_and_merge(processed_original, other_gen_lines, gen_blocks, deps, data_section, arch=self.arch)
         return final
 
     def get_output_file(self):

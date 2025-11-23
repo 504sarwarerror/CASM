@@ -82,8 +82,11 @@ class CLI:
         print(f"  {Colors.GREEN}-o <file>{Colors.ENDC}      Specify output file")
         print(f"  {Colors.GREEN}-e, --exe{Colors.ENDC}      Compile directly to .exe")
         print(f"  {Colors.GREEN}--build{Colors.ENDC}        Assemble and link to executable")
-        print(f"  {Colors.GREEN}--target <t>{Colors.ENDC}   Target OS: windows (only 'windows' is supported)")
+        print(f"  {Colors.GREEN}--target <t>{Colors.ENDC}   Target OS: windows, linux, macos")
+        print(f"  {Colors.GREEN}--arch <a>{Colors.ENDC}     Architecture: x86_64, arm64")
         print(f"  {Colors.GREEN}--run{Colors.ENDC}          Run after building")
+        print(f"  {Colors.GREEN}--debug{Colors.ENDC}        Enable debug symbols")
+        print(f"  {Colors.GREEN}--ldflags <f>{Colors.ENDC}  Linker flags (quoted string)")
         print(f"  {Colors.GREEN}-v, --verbose{Colors.ENDC}  Verbose output")
         print(f"  {Colors.GREEN}-h, --help{Colors.ENDC}     Show help")
         print()
@@ -91,6 +94,7 @@ class CLI:
         print(f"  {Colors.CYAN}casm program.asm{Colors.ENDC}")
         print(f"  {Colors.CYAN}casm program.asm --build{Colors.ENDC}")
         print(f"  {Colors.CYAN}casm program.asm --exe --run{Colors.ENDC}")
+        print(f"  {Colors.CYAN}casm program.asm --build --target macos --arch arm64{Colors.ENDC}")
         print(f"  {Colors.CYAN}casm program.asm -o output.asm -v{Colors.ENDC}")
     
     @staticmethod

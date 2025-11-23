@@ -118,7 +118,7 @@ def split_functions(code: str):
     return funcs
 
 
-def format_and_merge(original: str, generated_helpers: List[str], gen_blocks: dict, deps: dict, data_section: List[str]) -> str:
+def format_and_merge(original: str, generated_helpers: List[str], gen_blocks: dict, deps: dict, data_section: List[str], arch: str = 'x86_64') -> str:
     """Return merged assembly text.
 
     - original: original source text
@@ -254,18 +254,27 @@ def format_and_merge(original: str, generated_helpers: List[str], gen_blocks: di
     # externs
     if existing_externs:
         for e in sorted(existing_externs):
-            out_lines.append(f'extern {e}')
+            if arch == 'arm64':
+                out_lines.append(f'.extern _{e}')
+            else:
+                out_lines.append(f'extern {e}')
         out_lines.append('')
 
     # data
     if merged_data:
-        out_lines.append('section .data')
+        if arch == 'arm64':
+            out_lines.append('.data')
+        else:
+            out_lines.append('section .data')
         out_lines.extend(strip_comments(merged_data))
         out_lines.append('')
 
     # bss
     if merged_bss:
-        out_lines.append('section .bss')
+        if arch == 'arm64':
+            out_lines.append('.bss')
+        else:
+            out_lines.append('section .bss')
         out_lines.extend(strip_comments(merged_bss))
         out_lines.append('')
 
@@ -348,12 +357,18 @@ def format_and_merge(original: str, generated_helpers: List[str], gen_blocks: di
         # text block (unless a dependency already declared one). We removed
         # any stray header from generated_helpers above so we won't duplicate.
         if not has_text_header and orig_lines:
-            out_lines.append('section .text')
+            if arch == 'arm64':
+                out_lines.append('.text')
+            else:
+                out_lines.append('section .text')
         out_lines.extend(strip_comments(orig_lines))
         out_lines.append('')
     else:
         if not has_text_header and text:
-            out_lines.append('section .text')
+            if arch == 'arm64':
+                out_lines.append('.text')
+            else:
+                out_lines.append('section .text')
         out_lines.extend(strip_comments(text))
         out_lines.append('')
 
@@ -366,6 +381,10 @@ def format_and_merge(original: str, generated_helpers: List[str], gen_blocks: di
 
     # append stdlib functions selected
     if stdlib_funcs:
+        if arch == 'arm64':
+            out_lines.append('.text')
+        else:
+            out_lines.append('section .text')
         for fn in stdlib_funcs:
             out_lines.append(fn)
             out_lines.append('')

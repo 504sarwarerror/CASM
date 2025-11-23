@@ -83,6 +83,31 @@ class Backend(ABC):
     def emit_string_data(self, label, string_value):
         """Emit a string data declaration with architecture-specific syntax"""
         pass
+    
+    @abstractmethod
+    def load_address(self, dest_reg, label):
+        """Load the address of a label into a register"""
+        pass
+    
+    @abstractmethod
+    def call_function(self, name):
+        """Call a function by name"""
+        pass
+    
+    @abstractmethod
+    def emit_extern(self, name):
+        """Emit an external symbol declaration"""
+        pass
+    
+    @abstractmethod
+    def emit_data_section(self):
+        """Emit data section directive"""
+        pass
+    
+    @abstractmethod
+    def emit_text_section(self):
+        """Emit text section directive"""
+        pass
 
 
 class X86Backend(Backend):
@@ -163,6 +188,26 @@ class X86Backend(Backend):
     def emit_string_data(self, label, string_value):
         """Emit NASM-style string data"""
         self.data_section.append(f"{label} db `{string_value}`, 0")
+    
+    def load_address(self, dest_reg, label):
+        """Load effective address (LEA) for x86-64"""
+        self.output.append(f"    lea {dest_reg}, [rel {label}]")
+    
+    def call_function(self, name):
+        """Call a function (x86-64)"""
+        self.output.append(f"    call {name}")
+    
+    def emit_extern(self, name):
+        """Emit NASM extern declaration"""
+        self.output.append(f"extern {name}")
+    
+    def emit_data_section(self):
+        """Emit NASM data section"""
+        self.output.append("section .data")
+    
+    def emit_text_section(self):
+        """Emit NASM text section"""
+        self.output.append("section .text")
 
 
 class ARM64Backend(Backend):
@@ -217,6 +262,8 @@ class ARM64Backend(Backend):
         self.output.append(f"    bl _{name}")
 
     def ret(self):
+        # Set return value to 0 for main function
+        self.output.append("    mov x0, #0")
         self.epilogue()
 
     def jump(self, label):
@@ -251,3 +298,29 @@ class ARM64Backend(Backend):
         # Need to escape the string properly for ARM64 assembly
         escaped = string_value.replace('\\', '\\\\').replace('"', '\\"')
         self.data_section.append(f"{label}: .asciz \"{escaped}\"")
+    
+    def load_address(self, dest_reg, label):
+        """Load address using ADRP + ADD for ARM64"""
+        # ARM64 uses page-relative addressing
+        self.output.append(f"    adrp {dest_reg}, {label}@PAGE")
+        self.output.append(f"    add {dest_reg}, {dest_reg}, {label}@PAGEOFF")
+    
+    def call_function(self, name):
+        """Call a function (ARM64) - macOS requires underscore prefix"""
+        if name.startswith('_'):
+            self.output.append(f"    bl {name}")
+        else:
+            self.output.append(f"    bl _{name}")
+    
+    def emit_extern(self, name):
+        """Emit ARM64 extern declaration (GAS syntax)"""
+        # ARM64 on macOS uses .extern with underscore prefix
+        self.output.append(f".extern _{name}")
+    
+    def emit_data_section(self):
+        """Emit ARM64 data section (GAS syntax)"""
+        self.output.append(".data")
+    
+    def emit_text_section(self):
+        """Emit ARM64 text section (GAS syntax)"""
+        self.output.append(".text")

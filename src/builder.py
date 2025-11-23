@@ -216,7 +216,7 @@ class Builder:
                 # macOS linking: try clang
                 host_clang = shutil.which('clang') or shutil.which('gcc')
                 if host_clang:
-                    link_cmd = [host_clang, obj_file, '-o', exe_file, '-arch', 'x86_64']
+                    link_cmd = [host_clang, obj_file, '-o', exe_file, '-arch', self.arch]
                 else:
                     CLI.error("clang/gcc not found for linking macOS executable.")
                     return False

@@ -65,42 +65,55 @@ class StandardLibrary:
         # === PRINT FUNCTIONS ===
         if self.arch == 'arm64':
             # ARM64 version using printf from libc
+            # Note: printf is variadic, so arguments must be passed on the stack
             self.functions['print'] = {
                 'code': '''_print_string:
     ; x0 has string pointer
-    ; printf("%s", str)
-    stp x29, x30, [sp, #-16]!
-    mov x29, sp
-    mov x1, x0          ; string to 2nd arg
-    adrp x0, .fmt_str@PAGE
-    add x0, x0, .fmt_str@PAGEOFF
+    ; printf("%s", str) - variadic, so arg goes on stack
+    sub sp, sp, #32
+    stp x29, x30, [sp, #16]
+    add x29, sp, #16
+    mov x8, x0          ; save string pointer
+    mov x9, sp
+    str x8, [x9]        ; store string pointer on stack
+    adrp x0, _fmt_str@PAGE
+    add x0, x0, _fmt_str@PAGEOFF
     bl _printf
-    ldp x29, x30, [sp], #16
+    ldp x29, x30, [sp, #16]
+    add sp, sp, #32
     ret
-.fmt_str: .asciz "%s"
 
 _print_number:
     ; x0 has number
-    stp x29, x30, [sp, #-16]!
-    mov x29, sp
-    mov x1, x0          ; number to 2nd arg
-    adrp x0, .fmt_num@PAGE
-    add x0, x0, .fmt_num@PAGEOFF
+    ; printf("%lld", num) - variadic, so arg goes on stack
+    sub sp, sp, #32
+    stp x29, x30, [sp, #16]
+    add x29, sp, #16
+    mov x8, x0          ; save number
+    mov x9, sp
+    str x8, [x9]        ; store number on stack
+    adrp x0, _fmt_num@PAGE
+    add x0, x0, _fmt_num@PAGEOFF
     bl _printf
-    ldp x29, x30, [sp], #16
+    ldp x29, x30, [sp, #16]
+    add sp, sp, #32
     ret
-.fmt_num: .asciz "%lld"
 
 _print_hex:
-    stp x29, x30, [sp, #-16]!
-    mov x29, sp
-    mov x1, x0
-    adrp x0, .fmt_hex@PAGE
-    add x0, x0, .fmt_hex@PAGEOFF
+    ; x0 has number
+    sub sp, sp, #32
+    stp x29, x30, [sp, #16]
+    add x29, sp, #16
+    mov x8, x0
+    mov x9, sp
+    str x8, [x9]
+    adrp x0, _fmt_hex@PAGE
+    add x0, x0, _fmt_hex@PAGEOFF
     bl _printf
-    ldp x29, x30, [sp], #16
-    ret
-.fmt_hex: .asciz "0x%llX"''',
+    ldp x29, x30, [sp, #16]
+    add sp, sp, #32
+    ret''',
+                'data': ['_fmt_str: .asciz "%s"', '_fmt_num: .asciz "%lld"', '_fmt_hex: .asciz "0x%llX"'],
                 'externs': {'printf'},
                 'requires': ['initstdio']
             }

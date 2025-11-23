@@ -97,7 +97,11 @@ class CodeGenerator:
         # section to put generated instructions into.
         # Ensure there's a text section in the final assembly output.
         assembly_text = '\n'.join(self.backend.get_output())
-        if 'section .text' not in assembly_text.lower() and self.arch != 'arm64':
+        
+        # Check for text section directive (architecture-specific)
+        text_section_marker = 'section .text' if self.arch == 'x86_64' else '.text'
+        
+        if text_section_marker not in assembly_text.lower():
             # Prefer to insert the text section before any `global` directive
             # (e.g. `global main`) so globals remain after the section line.
             # If no `global` is present, insert after any leading `bits` or
@@ -107,7 +111,7 @@ class CodeGenerator:
             found_global = False
             output = self.backend.get_output()
             for i, line in enumerate(output):
-                if line.lstrip().lower().startswith('global '):
+                if line.lstrip().lower().startswith('global ') or line.lstrip().lower().startswith('.global '):
                     insert_index = i
                     found_global = True
                     break
@@ -124,7 +128,13 @@ class CodeGenerator:
                 else:
                     insert_index = 0
 
-            output.insert(insert_index, 'section .text')
+            # Use backend method to emit text section
+            temp_output = []
+            self.backend.emit_text_section()
+            text_section_line = self.backend.get_output()[-1]
+            output.insert(insert_index, text_section_line)
+            # Remove the duplicate we just added to backend output
+            self.backend.output.pop()
 
         return '\n'.join(self.backend.get_output()), self.backend.get_data_section(), self.stdlib_used
 
@@ -966,13 +976,13 @@ class CodeGenerator:
         elif func_name == 'println':
             self.generate_print(args)
             if self.bits == 64:
-                self.output.append(f"    lea {self.arg_regs[0]}, [rel _newline_str]")
-                self.output.append("    call _print_string")
+                self.backend.load_address(self.arg_regs[0], "_newline_str")
+                self.backend.call_function("_print_string")
             else:
                 # push string pointer and call (cdecl-like)
-                self.output.append("    push dword _newline_str")
-                self.output.append("    call _print_string")
-                self.output.append("    add esp, 4")
+                self.backend.emit_raw("    push dword _newline_str")
+                self.backend.call_function("_print_string")
+                self.backend.emit_raw("    add esp, 4")
             self.stdlib_used.add('print')
         elif func_name == 'scan':
             self.generate_scan(args)
@@ -980,18 +990,55 @@ class CodeGenerator:
             self.generate_scanint(args)
         elif func_name in ['strlen','strcpy','strcmp','strcat','abs','min','max','pow','arraysum','arrayfill','arraycopy','memset','memcpy','rand','sleep']:
             self.generate_stdlib_call(func_name, args)
+        elif func_name == 'printf' and self.arch == 'arm64':
+            # Special handling for printf on ARM64 - variadic function needs stack args
+            if args:
+                # Allocate stack space (32 bytes should be enough for most cases)
+                stack_size = max(32, len(args) * 8)
+                self.backend.emit_raw(f"    sub sp, sp, #{stack_size}")
+                self.backend.emit_raw("    stp x29, x30, [sp, #16]")
+                self.backend.emit_raw("    add x29, sp, #16")
+                
+                # First arg is format string (in x0)
+                if args[0].type == TokenType.STRING:
+                    str_label = f"_str_{self.string_counter}"
+                    self.string_counter += 1
+                    escaped_str = args[0].value.replace('`', '\\`').replace('\\n', '\\\\n').replace('\\r', '\\\\r')
+                    self.backend.emit_string_data(str_label, escaped_str)
+                    self.backend.load_address("x0", str_label)
+                
+                # Remaining args go on the stack
+                for i, arg in enumerate(args[1:]):
+                    if arg.type == TokenType.NUMBER:
+                        self.backend.emit_raw(f"    mov x8, #{arg.value}")
+                        self.backend.emit_raw(f"    str x8, [sp, #{i * 8}]")
+                    elif arg.type == TokenType.STRING:
+                        str_label = f"_str_{self.string_counter}"
+                        self.string_counter += 1
+                        escaped_str = arg.value.replace('`', '\\`').replace('\\n', '\\\\n').replace('\\r', '\\\\r')
+                        self.backend.emit_string_data(str_label, escaped_str)
+                        self.backend.load_address("x8", str_label)
+                        self.backend.emit_raw(f"    str x8, [sp, #{i * 8}]")
+                    elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
+                        val = self.remap_reg(arg.value)
+                        self.backend.emit_raw(f"    str {val}, [sp, #{i * 8}]")
+                
+                self.backend.call_function("printf")
+                self.backend.emit_raw("    ldp x29, x30, [sp, #16]")
+                self.backend.emit_raw(f"    add sp, sp, #{stack_size}")
         else:
             # Generic function call
+            # Use backend-provided argument registers instead of hardcoded x86 names
+            reg_params = self.arg_regs
+            
             # Determine calling convention parameters
             if self.target == 'windows':
-                reg_params = ['rcx', 'rdx', 'r8', 'r9']
                 shadow_space = 32
                 stack_arg_start_idx = 4
             else:
                 # System V (Linux/macOS)
-                reg_params = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
                 shadow_space = 0
-                stack_arg_start_idx = 6
+                stack_arg_start_idx = min(6, len(self.arg_regs))
 
             if self.bits == 64:
                 # 1. Identify args for registers vs stack
@@ -1037,8 +1084,8 @@ class CodeGenerator:
                         # But 'push qword [rel label]' is not valid in all modes, 
                         # usually 'push label' works as immediate in 64-bit (push imm32 sign extended)
                         # or we load to rax and push. Safer to load to rax.
-                        self.output.append(f"    lea rax, [rel {str_label}]")
-                        self.output.append("    push rax")
+                        self.backend.load_address("rax", str_label)
+                        self.backend.emit_raw("    push rax")
                     elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
                         val = self.remap_reg(val)
                         # If it's a memory operand or register, push it
@@ -1085,7 +1132,7 @@ class CodeGenerator:
                         self.string_counter += 1
                         escaped_str = arg.value.replace('`', '\\`').replace('\n', '\\n').replace('\r', '\\r')
                         self.backend.emit_string_data(str_label, escaped_str)
-                        self.output.append(f"    lea {dest_reg}, [rel {str_label}]")
+                        self.backend.load_address(dest_reg, str_label)
                     elif arg.type == TokenType.NUMBER:
                         self.output.append(f"    mov {dest_reg}, {arg.value}")
                     elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
@@ -1095,7 +1142,7 @@ class CodeGenerator:
                             self.emit_mov(dest_reg, src_val)
 
                 # 7. Call
-                self.output.append(f"    call {func_name}")
+                self.backend.call_function(func_name)
 
                 # 8. Cleanup stack
                 if total_stack_adj > 0:
@@ -1126,9 +1173,9 @@ class CodeGenerator:
                         self.output.append(f"    push {val}")
 
                 # call with underscore prefix for user functions on x86
-                self.output.append(f"    call _{func_name}")
+                self.backend.call_function(f"_{func_name}")
                 if args:
-                    self.output.append(f"    add esp, {4 * len(args)}")
+                    self.backend.emit_raw(f"    add esp, {4 * len(args)}")
 
         # emit end marker for this call
         end_line = self.current_token().line if self.current_token() else start_line
@@ -1145,36 +1192,36 @@ class CodeGenerator:
             if arg.type == TokenType.STRING:
                 str_label = f"_str_{self.string_counter}"
                 self.string_counter += 1
-                escaped_str = arg.value.replace('`', '\\`').replace('\n', '\\n').replace('\r', '\\r')
+                escaped_str = arg.value.replace('`', '\\`').replace('\n', '\\\\n').replace('\r', '\\\\r')
                 self.backend.emit_string_data(str_label, escaped_str)
-                self.output.append(f"    lea {arg_reg}, [rel {str_label}]")
-                self.output.append(f"    call _print_string")
+                self.backend.load_address(arg_reg, str_label)
+                self.backend.call_function("_print_string")
             elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
                 val = self.remap_reg(arg.value)
                 self.emit_mov(arg_reg, val)
-                self.output.append(f"    call _print_number")
+                self.backend.call_function("_print_number")
             elif arg.type == TokenType.NUMBER:
-                self.output.append(f"    mov {arg_reg}, {arg.value}")
-                self.output.append(f"    call _print_number")
+                self.backend.mov(arg_reg, arg.value)
+                self.backend.call_function("_print_number")
         else:
             # 32-bit: push arguments and call cdecl-style
             if arg.type == TokenType.STRING:
                 str_label = f"_str_{self.string_counter}"
                 self.string_counter += 1
-                escaped_str = arg.value.replace('`', '\\`').replace('\n', '\\n').replace('\r', '\\r')
+                escaped_str = arg.value.replace('`', '\\`').replace('\n', '\\\\n').replace('\r', '\\\\r')
                 self.backend.emit_string_data(str_label, escaped_str)
-                self.output.append(f"    push dword {str_label}")
-                self.output.append(f"    call _print_string")
-                self.output.append(f"    add esp, 4")
+                self.backend.emit_raw(f"    push dword {str_label}")
+                self.backend.call_function("_print_string")
+                self.backend.emit_raw("    add esp, 4")
             elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
                 val = self.remap_reg(arg.value)
-                self.output.append(f"    push {val}")
-                self.output.append(f"    call _print_number")
-                self.output.append(f"    add esp, 4")
+                self.backend.emit_raw(f"    push {val}")
+                self.backend.call_function("_print_number")
+                self.backend.emit_raw("    add esp, 4")
             elif arg.type == TokenType.NUMBER:
-                self.output.append(f"    push {arg.value}")
-                self.output.append(f"    call _print_number")
-                self.output.append(f"    add esp, 4")
+                self.backend.emit_raw(f"    push {arg.value}")
+                self.backend.call_function("_print_number")
+                self.backend.emit_raw("    add esp, 4")
     
     def generate_scan(self, args):
         if not args:
