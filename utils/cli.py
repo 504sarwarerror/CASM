@@ -159,12 +159,14 @@ class CLI:
             elif arg == '--target':
                 if i + 1 < len(args):
                     requested = args[i + 1].lower()
-                    if requested != 'windows':
-                        CLI.warning("only 'windows' target is supported. Forcing target to 'windows'.")
-                    config['target'] = 'windows'
+                    if requested in ['windows', 'linux', 'macos']:
+                        config['target'] = requested
+                    else:
+                        CLI.warning(f"Unknown target '{requested}'. Defaulting to 'windows'.")
+                        config['target'] = 'windows'
                     i += 2
                 else:
-                    CLI.error("--target requires a value (windows)")
+                    CLI.error("--target requires a value (windows, linux, macos)")
                     return None
             elif arg == '--ldflags':
                 # Accept a single string containing linker flags (quote as needed)

@@ -4,6 +4,7 @@ from libs.stdio import StandardLibrary
 from src.token import TokenType
 from .formatter import format_and_merge
 from .cli import CLI
+from src.c_asm_converter import CAsmConverter
 import os
 import re
 import pathlib
@@ -90,7 +91,7 @@ class SyntaxChecker:
 # ============================================
 
 class Compiler:
-    def __init__(self, input_file, output_file=None, verbose=False):
+    def __init__(self, input_file, output_file=None, verbose=False, **kwargs):
         self.input_file = input_file
         # Put all compiler outputs under a single `build/` directory at repo root.
         # Use provided output_file when given, otherwise default to
@@ -103,16 +104,41 @@ class Compiler:
             pass
 
         base = os.path.splitext(os.path.basename(input_file))[0]
-        default_out = os.path.join(build_dir, f"{base}-gen.asm")
+        ext = os.path.splitext(input_file)[1]
+        if ext.lower() == '.c':
+            default_out = os.path.join(build_dir, f"{base}-gen.c")
+        else:
+            default_out = os.path.join(build_dir, f"{base}-gen.asm")
         self.output_file = output_file or default_out
         self.verbose = verbose
-        self.stdlib = StandardLibrary()
+        self.target = kwargs.get('target', 'windows')
+        self.stdlib = StandardLibrary(target=self.target)
 
     def log(self, message):
         if self.verbose:
             CLI.info(message)
 
     def compile(self, _included=None):
+        if self.input_file.lower().endswith('.c'):
+            try:
+                with open(self.input_file, 'r', encoding='utf-8') as f:
+                    source = f.read()
+                
+                converter = CAsmConverter(source)
+                output = converter.convert()
+                
+                with open(self.output_file, 'w', encoding='utf-8') as f:
+                    f.write(output)
+                
+                self.log(f"C conversion successful: {self.output_file}")
+                CLI.success(f"Converted {os.path.basename(self.input_file)}")
+                return True
+            except Exception as e:
+                CLI.error(f"C conversion error: {e}")
+                import traceback
+                traceback.print_exc()
+                return False
+
         # CLI.step(f"Compiling {self.input_file}...") # Removed, spinner handles this
 
         # Track included files to avoid recursive inclusion loops.
@@ -164,7 +190,7 @@ class Compiler:
 
             _included.add(inc_abspath)
             # compile included file and write its generated asm to the build dir
-            child_compiler = Compiler(inc_abspath, output_file=None, verbose=self.verbose)
+            child_compiler = Compiler(inc_abspath, output_file=None, verbose=self.verbose, target=self.target)
             # ensure child uses same included-set to avoid cycles
             ok = child_compiler.compile(_included)
             if not ok:
@@ -210,7 +236,7 @@ class Compiler:
 
             self.log("Generating assembly code...")
             try:
-                codegen = CodeGenerator(tokens)
+                codegen = CodeGenerator(tokens, target=self.target)
                 generated_code, data_section, stdlib_used = codegen.generate()
                 self.log(f"    Generated {len(generated_code.split(chr(10)))} lines")
                 self.log(f"    Using stdlib functions: {', '.join(stdlib_used) if stdlib_used else 'none'}")

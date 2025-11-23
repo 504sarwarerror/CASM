@@ -2,20 +2,23 @@ A contemporary high-level front-end for NASM (Windows x64 focused) that accepts 
 
 ## Features
 
-- High-level constructs: `if/elif/else`, `for`, `while`, `print`
-- Built-in standard library: I/O, strings, math, arrays, memory operations
-- Seamless inline assembly passthrough
-- Windows x64 NASM output (adaptable to other platforms)
-- Automatic register allocation for parameters and temporaries
+- **High-level constructs**: `if/elif/else`, `for`, `while`, `print`
+- **Built-in standard library**: I/O, strings, math, arrays, memory operations
+- **Seamless inline assembly passthrough**
+- **C file support**: Write inline assembly in C files with automatic AT&T syntax conversion
+- **Cross-platform builds**: Native support for Windows, Linux, and macOS targets
+- **Automatic register allocation** for parameters and temporaries
 
 ## Prerequisites
 
 - **Python 3.8+**
 - **NASM** - for assembling produced `.asm` files into object files
-- **Linker toolchain** (optional, for producing executables):
-  - Windows: MSVC, MinGW-w64, or similar
-  - macOS/Linux: `clang` or `gcc`
-  - macOS cross-compile to Windows: `mingw-w64` (via Homebrew)
+- **GCC/Clang** - for compiling C files and linking executables
+- **Cross-platform toolchains** (for targeting different platforms):
+  - **Windows target**: MinGW-w64 (`x86_64-w64-mingw32-gcc`)
+  - **macOS target**: Xcode Command Line Tools (`clang`)
+  - **Linux target**: GCC or Clang
+  - **macOS cross-compile to Windows**: `brew install mingw-w64 nasm`
 
 ## Quick Start
 
@@ -27,6 +30,14 @@ python3 main.py examples/hello.asm -o out_compiled.asm
 
 # Compile, build, and run
 python3 main.py examples/hello.asm --build --run
+
+# Compile C file with inline assembly
+python3 main.py mycode.c --build --run
+
+# Cross-platform compilation
+python3 main.py examples/hello.asm --build --target macos
+python3 main.py examples/hello.asm --build --target linux
+python3 main.py examples/hello.asm --build --target windows
 ```
 
 ### Install globally (optional)
@@ -369,16 +380,134 @@ else
 endif
 ```
 
+## C File Support with Inline Assembly
+
+CASM now supports compiling C files that contain inline x86-64 assembly! This feature automatically converts Intel syntax assembly to AT&T syntax for GCC/Clang inline assembly.
+
+### How It Works
+
+1. Write your C code with inline assembly using Intel syntax (NASM-style)
+2. CASM detects assembly instructions and converts them to GCC-compatible inline assembly
+3. The converted code is compiled using GCC/Clang
+
+### Example
+
+```c
+#include <stdio.h>
+
+int main() {
+    int result = 0;
+    
+    // Write assembly using Intel syntax
+    mov rax, 42
+    add rax, 8
+    mov result, rax
+    
+    printf("Result: %d\n", result);
+    return 0;
+}
+```
+
+CASM automatically converts this to:
+
+```c
+#include <stdio.h>
+
+int main() {
+    int result = 0;
+    
+    __asm__(
+        "movq $42, %0;"
+        "addq $8, %0;"
+        : "+r"(result)
+        : 
+        : 
+    );
+    
+    printf("Result: %d\n", result);
+    return 0;
+}
+```
+
+### Usage
+
+```bash
+# Compile and run a C file with inline assembly
+python3 main.py mycode.c --build --run
+
+# Cross-compile for Windows from macOS/Linux
+python3 main.py mycode.c --build --target windows
+```
+
+### Features
+
+- **Automatic syntax conversion**: Intel → AT&T syntax
+- **Smart variable tracking**: Automatically determines input/output constraints
+- **Register clobber detection**: Tracks which registers are modified
+- **Memory operand conversion**: Handles complex addressing modes
+- **SIMD support**: Recognizes SSE/AVX instructions
+
+## Cross-Platform Support
+
+CASM supports building executables for multiple platforms:
+
+### Supported Targets
+
+- **Windows** (x64): Uses MinGW-w64 for cross-compilation
+- **Linux** (x64): Native GCC/Clang compilation
+- **macOS** (x64): Native Clang compilation
+
+### Target Selection
+
+Use the `--target` flag to specify your target platform:
+
+```bash
+# Build for Windows (default)
+python3 main.py code.asm --build --target windows
+
+# Build for macOS
+python3 main.py code.asm --build --target macos
+
+# Build for Linux
+python3 main.py code.asm --build --target linux
+```
+
+### Cross-Compilation
+
+**From macOS to Windows:**
+```bash
+# Install MinGW-w64
+brew install mingw-w64 nasm
+
+# Build Windows executable
+python3 main.py code.asm --build --target windows
+```
+
+**From Linux to Windows:**
+```bash
+# Install MinGW-w64
+sudo apt-get install mingw-w64 nasm
+
+# Build Windows executable
+python3 main.py code.asm --build --target windows
+```
+
+### Platform-Specific Notes
+
+- **Windows**: Generates `.exe` files, uses `win64` NASM format
+- **Linux**: Uses `elf64` NASM format
+- **macOS**: Uses `macho64` NASM format with automatic symbol prefixing (`_`)
+
 ## Limitations & Caveats
 
-- **Platform focus**: Primarily designed for Windows x64 NASM output
 - **Windows API dependencies**: Some stdlib functions assume Windows APIs (`WriteConsoleA`, etc.)
 - **Register allocation**: Simple register allocator may have conflicts with heavy variable usage
 - **String literals**: Automatically emitted into `.data` section with generated labels
+- **C inline assembly**: Only supports x86-64 assembly; complex macros may need manual adjustment
 
 ### Adapting for Other Platforms
 
-To target Linux/macOS, modify the standard library in `libs/stdio.py` to use appropriate syscalls or libc functions instead of Windows API calls.
+To target Linux/macOS with the standard library, modify `libs/stdio.py` to use appropriate syscalls or libc functions instead of Windows API calls.
 
 ## Project Structure
 

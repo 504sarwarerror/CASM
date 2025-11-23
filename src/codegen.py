@@ -2,7 +2,7 @@ from src.token import TokenType, Token
 
 
 class CodeGenerator:
-    def __init__(self, tokens):
+    def __init__(self, tokens, target='windows'):
         self.tokens = tokens
         self.pos = 0
         self.output = []
@@ -15,12 +15,20 @@ class CodeGenerator:
         self.functions = {}
         self.current_function = None
         self.register_map = {}
+        self.target = target
         # default to 64-bit generation; can be switched to 32-bit by
         # passing bits=32 when constructing CodeGenerator.
         self.bits = 64
         # prefer using the extended registers for temporary/callee-saved
         # allocations so generated code can use r8..r15 (and their d subregs)
         self._reg_pool = ['r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15', 'rbx']
+        
+        # Calling convention registers
+        if self.target == 'windows':
+            self.arg_regs = ['rcx', 'rdx', 'r8', 'r9']
+        else:
+            # System V AMD64 (Linux/macOS)
+            self.arg_regs = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
     
     def generate(self):
         while self.pos < len(self.tokens):
@@ -364,7 +372,7 @@ class CodeGenerator:
             }
             if not cond_map.get(op.type, False):
                 # condition is false at compile time: skip true-block
-                self.output.append(f"    jmp {label_next}")
+                self.output.append(f"    jmp near {label_next}")
         else:
             # choose left and right so left is register/memory (valid cmp dest)
             if var_token.type == TokenType.NUMBER:
@@ -402,7 +410,7 @@ class CodeGenerator:
         # FIXED: Only jump to end if there are elif/else blocks coming
         has_elif_or_else = self.current_token() and self.current_token().type in [TokenType.ELIF, TokenType.ELSE]
         if has_elif_or_else:
-            self.output.append(f"    jmp {label_end}")
+            self.output.append(f"    jmp near {label_end}")
         
         # Place label_next (where we jump when condition is FALSE)
         self.output.append(f"{label_next}:")
@@ -450,7 +458,7 @@ class CodeGenerator:
                         TokenType.LE: (a <= b), TokenType.GE: (a >= b)
                     }
                     if not cond_map.get(op.type, False):
-                        self.output.append(f"    jmp {label_next}")
+                        self.output.append(f"    jmp near {label_next}")
                 else:
                     # choose left so it's register/memory
                     if var_token.type == TokenType.NUMBER:
@@ -472,7 +480,7 @@ class CodeGenerator:
                     self.output.append(f"    {jm2} {label_next}")
                 
                 self.generate_block([TokenType.ELIF, TokenType.ELSE, TokenType.ENDIF])
-                self.output.append(f"    jmp {label_end}")
+                self.output.append(f"    jmp near {label_end}")
                 self.output.append(f"{label_next}:")
                 
             elif self.current_token().type == TokenType.ELSE:
@@ -637,7 +645,7 @@ class CodeGenerator:
 
         self.output.append(f"{label_continue}:")
         self.output.append(f"    inc {loop_reg}")
-        self.output.append(f"    jmp {label_start}")
+        self.output.append(f"    jmp near {label_start}")
         self.output.append(f"{label_end}:")
         
         self.loop_stack.pop()
@@ -708,7 +716,7 @@ class CodeGenerator:
             }
             if not cond_map.get(op.type, False):
                 # condition false => jump to end immediately
-                self.output.append(f"    jmp {label_end}")
+                self.output.append(f"    jmp near {label_end}")
         else:
             # ensure left operand is a register/memory for valid cmp
             if var_token.type == TokenType.NUMBER:
@@ -738,10 +746,10 @@ class CodeGenerator:
         # Only emit the conditional jump if we actually emitted a cmp; for
         # constant-true loops we don't want a premature conditional branch.
         if cmp_emitted:
-            self.output.append(f"    {jm} {label_end}")
+            self.output.append(f"    {jm} near {label_end}")
         self.generate_block([TokenType.ENDWHILE])
         
-        self.output.append(f"    jmp {label_start}")
+        self.output.append(f"    jmp near {label_start}")
         self.output.append(f"{label_end}:")
         
         self.loop_stack.pop()
@@ -790,14 +798,16 @@ class CodeGenerator:
             'params': params
         }
 
-        # Emit function label and prologue according to target bitness
+        # Emit function label and prologue
+        self.output.append(f"\nglobal {func_name}")
+        self.output.append(f"{func_name}:")
+        
         if self.bits == 64:
-            self.output.append(f"\n{func_name}:")
             self.output.append("    push rbp")
             self.output.append("    mov rbp, rsp")
 
-            # Map incoming parameters (RCX, RDX, R8, R9) to internal callee-saved regs
-            reg_map = ['rcx', 'rdx', 'r8', 'r9']
+            # Map incoming parameters to internal callee-saved regs
+            reg_map = self.arg_regs
             for i, p in enumerate(params):
                 internal = self.allocate_reg_for(p)
                 if i < len(reg_map):
@@ -807,7 +817,7 @@ class CodeGenerator:
                     self.output.append(f"    ; WARNING: parameter '{p}' passed on stack not supported")
         else:
             # 32-bit: prefix user function names with '_' to match C/Win decorations
-            self.output.append(f"\n_{func_name}:")
+            # (Already handled by _get_symbol_name above, but logic here was specific to 32-bit prologue)
             self.output.append("    push ebp")
             self.output.append("    mov ebp, esp")
 
@@ -847,13 +857,13 @@ class CodeGenerator:
     def generate_break(self):
         if not self.loop_stack:
             raise SyntaxError(f"Line {self.current_token().line}: 'break' outside loop")
-        self.output.append(f"    jmp {self.loop_stack[-1]['break']}")
+        self.output.append(f"    jmp near {self.loop_stack[-1]['break']}")
         self.advance()
     
     def generate_continue(self):
         if not self.loop_stack:
             raise SyntaxError(f"Line {self.current_token().line}: 'continue' outside loop")
-        self.output.append(f"    jmp {self.loop_stack[-1]['continue']}")
+        self.output.append(f"    jmp near {self.loop_stack[-1]['continue']}")
         self.advance()
     
     def generate_block(self, end_tokens):
@@ -935,7 +945,7 @@ class CodeGenerator:
         elif func_name == 'println':
             self.generate_print(args)
             if self.bits == 64:
-                self.output.append("    lea rcx, [rel _newline_str]")
+                self.output.append(f"    lea {self.arg_regs[0]}, [rel _newline_str]")
                 self.output.append("    call _print_string")
             else:
                 # push string pointer and call (cdecl-like)
@@ -956,7 +966,7 @@ class CodeGenerator:
                 arg_str = ', '.join(arg.value for arg in args)
                 self.output.append(f"    ; Call {func_name} with args: {arg_str}")
             if self.bits == 64:
-                reg_map = ['rcx', 'rdx', 'r8', 'r9']
+                reg_map = self.arg_regs
                 for i, arg in enumerate(args[:4]):
                     if arg.type == TokenType.STRING:
                         str_label = f"_str_{self.string_counter}"
@@ -1002,19 +1012,20 @@ class CodeGenerator:
         arg = args[0]
         
         if self.bits == 64:
+            arg_reg = self.arg_regs[0]
             if arg.type == TokenType.STRING:
                 str_label = f"_str_{self.string_counter}"
                 self.string_counter += 1
                 escaped_str = arg.value.replace('`', '\\`')
                 self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
-                self.output.append(f"    lea rcx, [rel {str_label}]")
+                self.output.append(f"    lea {arg_reg}, [rel {str_label}]")
                 self.output.append(f"    call _print_string")
             elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
                 val = self.remap_reg(arg.value)
-                self.output.append(f"    mov rcx, {val}")
+                self.output.append(f"    mov {arg_reg}, {val}")
                 self.output.append(f"    call _print_number")
             elif arg.type == TokenType.NUMBER:
-                self.output.append(f"    mov rcx, {arg.value}")
+                self.output.append(f"    mov {arg_reg}, {arg.value}")
                 self.output.append(f"    call _print_number")
         else:
             # 32-bit: push arguments and call cdecl-style
@@ -1042,8 +1053,8 @@ class CodeGenerator:
         buffer = args[0].value
         buffer_size = args[1].value if len(args) > 1 else "256"
         if self.bits == 64:
-            self.output.append(f"    lea rcx, [rel {buffer}]")
-            self.output.append(f"    mov rdx, {buffer_size}")
+            self.output.append(f"    lea {self.arg_regs[0]}, [rel {buffer}]")
+            self.output.append(f"    mov {self.arg_regs[1]}, {buffer_size}")
             self.output.append(f"    call _scan_string")
         else:
             # push size then buffer pointer
@@ -1057,7 +1068,7 @@ class CodeGenerator:
             return
         var = args[0].value
         if self.bits == 64:
-            self.output.append(f"    lea rcx, [rel {var}]")
+            self.output.append(f"    lea {self.arg_regs[0]}, [rel {var}]")
             self.output.append(f"    call _scanint")
         else:
             self.output.append(f"    push dword {var}")
@@ -1067,8 +1078,8 @@ class CodeGenerator:
     def generate_stdlib_call(self, func_name, args):
         # Support both x64 (register) and x86 (stack push) argument passing
         if self.bits == 64:
-            # Map arguments to registers (Windows x64 calling convention)
-            reg_map = ['rcx', 'rdx', 'r8', 'r9']
+            # Map arguments to registers
+            reg_map = self.arg_regs
             for i, arg in enumerate(args[:4]):
                 if i < len(reg_map):
                     if arg.type == TokenType.STRING:

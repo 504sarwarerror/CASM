@@ -26,7 +26,8 @@ def main():
     compiler = Compiler(
         config['input_file'],
         config['output_file'],
-        config['verbose']
+        config['verbose'],
+        target=config.get('target', 'windows')
     )
     
     if not compiler.compile():

@@ -21,6 +21,10 @@ class Builder:
             CLI.info(message)
     
     def assemble_and_link(self):
+        # Check if the input is a C file (from the new C-to-ASM feature)
+        if self.compiled_file.lower().endswith('.c'):
+            return self.compile_c_file()
+
         obj_ext = '.obj' if self.target == 'windows' else '.o'
         exe_ext = '.exe' if self.target == 'windows' else ''
 
@@ -45,6 +49,72 @@ class Builder:
         
         CLI.success(f"Built {os.path.basename(exe_file)}")
         return True
+
+    def compile_c_file(self):
+        exe_ext = '.exe' if self.target == 'windows' else ''
+        
+        # Determine output executable name
+        if self.compiled_file.endswith('-gen.c'):
+            base_no_gen = self.compiled_file[:-len('-gen.c')]
+        else:
+            base_no_gen = os.path.splitext(self.compiled_file)[0]
+            
+        exe_file = base_no_gen + exe_ext
+        
+        with CLI.spinner(f"Compiling {os.path.basename(exe_file)}..."):
+            self.log(f"Compiling {self.compiled_file} with GCC/Clang...")
+            
+            # Determine compiler command
+            cmd = []
+            if self.target == 'windows':
+                 # Prefer mingw-w64 cross-compiler if available
+                cross_gcc = shutil.which('x86_64-w64-mingw32-gcc') or shutil.which('x86_64-w64-mingw32-clang')
+                if cross_gcc:
+                    cmd = [cross_gcc, self.compiled_file, '-o', exe_file, '-m64']
+                else:
+                    host_gcc = shutil.which('gcc')
+                    if host_gcc:
+                        CLI.warning("mingw-w64 cross-compiler not found. Trying host gcc (may fail).")
+                        cmd = [host_gcc, self.compiled_file, '-o', exe_file, '-m64']
+                    else:
+                        CLI.error("No suitable GCC found to compile Windows executable.")
+                        return False
+            else:
+                # Linux/macOS
+                compiler = shutil.which('gcc') or shutil.which('clang')
+                if not compiler:
+                    CLI.error("GCC or Clang not found.")
+                    return False
+                cmd = [compiler, self.compiled_file, '-o', exe_file]
+                if self.target == 'linux':
+                    cmd.append('-m64')
+
+            # Add debug flags
+            if self.debug:
+                cmd.append('-g')
+                
+            # Add user linker flags (which might include include paths or libs)
+            if self.linker_flags:
+                try:
+                    extra = shlex.split(self.linker_flags)
+                except Exception:
+                    extra = self.linker_flags.split()
+                cmd.extend(extra)
+            
+            self.log(f"Running: {' '.join(cmd)}")
+            
+            try:
+                result = subprocess.run(cmd, capture_output=True, text=True)
+                if result.returncode != 0:
+                    CLI.error("Compilation failed:")
+                    print(result.stderr)
+                    return False
+            except Exception as e:
+                CLI.error(f"Compilation error: {e}")
+                return False
+                
+        CLI.success(f"Built {os.path.basename(exe_file)}")
+        return True
     
     def assemble_file(self, asm_file, obj_file):
         # Choose NASM output format based on target
@@ -55,6 +125,15 @@ class Builder:
         # CodeView debug information compatible with many Windows debuggers.
         if self.debug and self.target == 'windows':
             nasm_cmd.extend(['-gcv8', '-F', 'cv8'])
+        
+        # For macOS, add underscore prefix to all globals/externs automatically
+        if self.target == 'macos':
+            nasm_cmd.extend(['--prefix', '_'])
+
+        # Enable multi-pass optimization to resolve label offsets
+        # Use -Ox for maximum optimization passes (needed when --prefix changes label sizes)
+        nasm_cmd.append('-Ox')
+
         nasm_cmd.extend([asm_file, '-o', obj_file])
         
         try:
@@ -109,7 +188,7 @@ class Builder:
                 # macOS linking: try clang
                 host_clang = shutil.which('clang') or shutil.which('gcc')
                 if host_clang:
-                    link_cmd = [host_clang, obj_file, '-o', exe_file]
+                    link_cmd = [host_clang, obj_file, '-o', exe_file, '-arch', 'x86_64']
                 else:
                     CLI.error("clang/gcc not found for linking macOS executable.")
                     return False
@@ -145,9 +224,6 @@ class Builder:
                     print(result.stderr)
                 if result.stdout:
                     print(result.stdout)
-                # Helpful message for Windows cross-compile
-                if self.target == 'windows':
-                    print("    If you're on macOS, install mingw-w64: brew install mingw-w64 nasm")
                 return False
 
             return True
@@ -160,6 +236,8 @@ class Builder:
         # Use the same base-name logic as assemble_and_link to find the exe
         if self.compiled_file.endswith('-gen.asm'):
             base_no_gen = self.compiled_file[:-len('-gen.asm')]
+        elif self.compiled_file.endswith('-gen.c'):
+            base_no_gen = self.compiled_file[:-len('-gen.c')]
         else:
             base_no_gen = os.path.splitext(self.compiled_file)[0]
 

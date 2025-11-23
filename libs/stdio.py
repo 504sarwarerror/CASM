@@ -1,6 +1,7 @@
 class StandardLibrary:
     
-    def __init__(self):
+    def __init__(self, target='windows'):
+        self.target = target
         self.functions = {}
         self._init_library()
     
@@ -47,7 +48,141 @@ class StandardLibrary:
     
     def _init_library(self):
         """Initialize all library functions"""
-        
+        if self.target == 'windows':
+            self._init_windows()
+        else:
+            self._init_libc()
+
+    def _init_libc(self):
+        # === I/O INITIALIZATION (libc handles this) ===
+        self.functions['initstdio'] = {
+            'code': '''_initstdio:
+    ret''',
+            'externs': set()
+        }
+
+        # === PRINT FUNCTIONS ===
+        self.functions['print'] = {
+            'code': '''_print_string:
+    ; RDI/RCX has string pointer
+    ; printf("%s", str)
+    sub rsp, 8
+    mov rsi, rdi  ; string to 2nd arg
+    lea rdi, [rel .fmt] ; format to 1st arg
+    xor rax, rax  ; no vector args
+    call printf
+    add rsp, 8
+    ret
+.fmt db "%s", 0
+
+_print_number:
+    ; RDI/RCX has number
+    sub rsp, 8
+    mov rsi, rdi  ; number to 2nd arg
+    lea rdi, [rel .fmt]
+    xor rax, rax
+    call printf
+    add rsp, 8
+    ret
+.fmt db "%lld", 0
+
+_print_hex:
+    sub rsp, 8
+    mov rsi, rdi
+    lea rdi, [rel .fmt]
+    xor rax, rax
+    call printf
+    add rsp, 8
+    ret
+.fmt db "0x%llX", 0''',
+            'externs': {'printf'},
+            'requires': ['initstdio']
+        }
+
+        self.functions['println'] = {
+            'code': '',
+            'data': ['_newline_str db 10, 0'],
+            'requires': ['print']
+        }
+
+        # === INPUT FUNCTIONS ===
+        self.functions['scan'] = {
+            'code': '''_scan_string:
+    ; RDI = buffer, RSI = size
+    ; fgets(buffer, size, stdin)
+    sub rsp, 8
+    mov rdx, [rel stdin] ; 3rd arg
+    ; rdi and rsi are already correct for fgets(char *s, int size, FILE *stream)
+    call fgets
+    
+    ; Remove newline if present
+    mov rdi, rax ; result buffer
+    test rdi, rdi
+    jz .done
+    call _strlen
+    cmp rax, 0
+    je .done
+    mov rdx, rax
+    dec rdx
+    cmp byte [rdi + rdx], 10
+    jne .done
+    mov byte [rdi + rdx], 0
+.done:
+    add rsp, 8
+    ret''',
+            'externs': {'fgets', 'stdin', 'strlen'},
+            'requires': ['initstdio']
+        }
+        # Note: _strlen is internal, no prefix needed from libc
+
+        self.functions['scanint'] = {
+            'code': '''_scanint:
+    ; RDI = int pointer
+    sub rsp, 8
+    mov rsi, rdi ; pointer to 2nd arg
+    lea rdi, [rel .fmt]
+    xor rax, rax
+    call scanf
+    add rsp, 8
+    ret
+.fmt db "%lld", 0''',
+            'externs': {'scanf'},
+            'requires': ['initstdio']
+        }
+
+        # === STRING FUNCTIONS ===
+        self._init_common_string_ops()
+
+        # === MATH FUNCTIONS ===
+        self._init_common_math_ops()
+
+        # === ARRAY/MEMORY FUNCTIONS ===
+        self._init_common_memory_ops()
+
+        # === RANDOM NUMBER ===
+        self.functions['rand'] = {
+            'code': '''_rand:
+    sub rsp, 8
+    call rand
+    add rsp, 8
+    ret''',
+            'externs': {'rand'}
+        }
+
+        # === SLEEP FUNCTION ===
+        self.functions['sleep'] = {
+            'code': '''_sleep:
+    ; RDI has milliseconds
+    ; usleep(ms * 1000)
+    sub rsp, 8
+    imul rdi, 1000
+    call usleep
+    add rsp, 8
+    ret''',
+            'externs': {'usleep'}
+        }
+
+    def _init_windows(self):
         # === I/O INITIALIZATION ===
         self.functions['initstdio'] = {
             'code': '''_initstdio:
@@ -218,7 +353,38 @@ _scan_int:
             'externs': {'ReadConsoleA', 'sscanf'},
             'requires': ['initstdio']
         }
+
+        self._init_common_string_ops()
+        self._init_common_math_ops()
+        self._init_common_memory_ops()
+
+        # === RANDOM NUMBER ===
+        self.functions['rand'] = {
+            'code': '''_rand:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    call rand
+    add rsp, 32
+    pop rbp
+    ret''',
+            'externs': {'rand'}
+        }
         
+        # === SLEEP FUNCTION ===
+        self.functions['sleep'] = {
+            'code': '''_sleep:
+    push rbp
+    mov rbp, rsp
+    sub rsp, 32
+    call Sleep
+    add rsp, 32
+    pop rbp
+    ret''',
+            'externs': {'Sleep'}
+        }
+
+    def _init_common_string_ops(self):
         # === STRING FUNCTIONS ===
         self.functions['strlen'] = {
             'code': '''_strlen:
@@ -303,7 +469,8 @@ _scan_int:
     ret''',
             'externs': set()
         }
-        
+
+    def _init_common_math_ops(self):
         # === MATH FUNCTIONS ===
         self.functions['abs'] = {
             'code': '''_abs:
@@ -357,7 +524,8 @@ _scan_int:
     ret''',
             'externs': set()
         }
-        
+
+    def _init_common_memory_ops(self):
         # === ARRAY FUNCTIONS ===
         self.functions['arraysum'] = {
             'code': '''_arraysum:
@@ -441,30 +609,4 @@ _scan_int:
     pop r12
     ret''',
             'externs': set()
-        }
-        
-        # === RANDOM NUMBER ===
-        self.functions['rand'] = {
-            'code': '''_rand:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32
-    call rand
-    add rsp, 32
-    pop rbp
-    ret''',
-            'externs': {'rand'}
-        }
-        
-        # === SLEEP FUNCTION ===
-        self.functions['sleep'] = {
-            'code': '''_sleep:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32
-    call Sleep
-    add rsp, 32
-    pop rbp
-    ret''',
-            'externs': {'Sleep'}
         }
