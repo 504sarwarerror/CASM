@@ -294,6 +294,4 @@ Experimental compiler project. See LICENSE for details.
 - **Pull Requests**: Contributions welcome
 - **Questions**: Use discussions or issues
 
----
-
-Made with care for assembly enthusiasts
+Made with care for assembly enthusiasts <3
