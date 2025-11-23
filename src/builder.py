@@ -121,7 +121,11 @@ class Builder:
         # ARM64 uses clang as assembler (.s files), x86_64 uses NASM (.asm files)
         if self.arch == 'arm64':
             # Use clang to assemble ARM64 .s files
-            clang_cmd = ['clang', '-c', asm_file, '-o', obj_file, '-arch', 'arm64']
+            if self.target == 'windows':
+                clang_cmd = ['clang', '-c', asm_file, '-o', obj_file, '--target=aarch64-pc-windows-msvc']
+            else:
+                clang_cmd = ['clang', '-c', asm_file, '-o', obj_file, '-arch', 'arm64']
+            
             if self.debug:
                 clang_cmd.append('-g')
             
@@ -187,20 +191,25 @@ class Builder:
         # Linking depends on target and toolchain availability
         try:
             if self.target == 'windows':
-                # Prefer mingw-w64 cross-compiler if available
-                cross_gcc = shutil.which('x86_64-w64-mingw32-gcc') or shutil.which('x86_64-w64-mingw32-clang')
-                if cross_gcc:
-                    link_cmd = [cross_gcc, obj_file, '-o', exe_file, '-m64']
+                if self.arch == 'arm64':
+                    # Use clang/lld for ARM64 Windows
+                    link_cmd = ['clang', obj_file, '-o', exe_file, '--target=aarch64-pc-windows-msvc', '-fuse-ld=lld']
+                    # Add msvcrt if needed, but clang usually links default libs
                 else:
-                    # Fallback to host gcc (may fail to produce a Win32 exe on non-Windows hosts)
-                    host_gcc = shutil.which('gcc')
-                    if host_gcc:
-                        CLI.warning("mingw-w64 cross-compiler not found. Trying host gcc (may fail).")
-                        link_cmd = [host_gcc, obj_file, '-o', exe_file, '-m64']
+                    # Prefer mingw-w64 cross-compiler if available
+                    cross_gcc = shutil.which('x86_64-w64-mingw32-gcc') or shutil.which('x86_64-w64-mingw32-clang')
+                    if cross_gcc:
+                        link_cmd = [cross_gcc, obj_file, '-o', exe_file, '-m64']
                     else:
-                        CLI.error("No suitable GCC found to link Windows executable.")
-                        print("    Install mingw-w64 on macOS: brew install mingw-w64 nasm")
-                        return False
+                        # Fallback to host gcc (may fail to produce a Win32 exe on non-Windows hosts)
+                        host_gcc = shutil.which('gcc')
+                        if host_gcc:
+                            CLI.warning("mingw-w64 cross-compiler not found. Trying host gcc (may fail).")
+                            link_cmd = [host_gcc, obj_file, '-o', exe_file, '-m64']
+                        else:
+                            CLI.error("No suitable GCC found to link Windows executable.")
+                            print("    Install mingw-w64 on macOS: brew install mingw-w64 nasm")
+                            return False
 
             elif self.target == 'linux':
                 # Link for Linux ELF; host gcc is preferred

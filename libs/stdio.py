@@ -248,6 +248,10 @@ _print_hex:
         }
 
     def _init_windows(self):
+        if self.arch == 'arm64':
+            self._init_windows_arm64()
+            return
+
         # === I/O INITIALIZATION ===
         self.functions['initstdio'] = {
             'code': '''_initstdio:
@@ -395,18 +399,324 @@ _scan_int:
     ret''',
             'externs': {'rand'}
         }
+
+    def _init_windows_arm64(self):
+        # === I/O INITIALIZATION ===
+        self.functions['initstdio'] = {
+            'code': '''_initstdio:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    sub sp, sp, #32     // shadow space
+    mov x0, #-11        // STD_OUTPUT_HANDLE
+    bl GetStdHandle
+    adrp x1, _stdout_handle
+    add x1, x1, :lo12:_stdout_handle
+    str x0, [x1]
+    mov x0, #-10        // STD_INPUT_HANDLE
+    bl GetStdHandle
+    adrp x1, _stdin_handle
+    add x1, x1, :lo12:_stdin_handle
+    str x0, [x1]
+    add sp, sp, #32
+    ldp x29, x30, [sp], #16
+    ret''',
+            'bss': ['_stdout_handle: .skip 8', '_stdin_handle: .skip 8'],
+            'externs': {'GetStdHandle'}
+        }
         
-        # === SLEEP FUNCTION ===
+        # === PRINT FUNCTIONS ===
+        self.functions['print'] = {
+            'code': '''_print_string:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    sub sp, sp, #48     // shadow space (32) + alignment/args
+    mov x1, x0          // string to 2nd arg
+    adr x0, .fmt_str
+    bl printf
+    add sp, sp, #48
+    ldp x29, x30, [sp], #16
+    ret
+    .p2align 3
+.fmt_str: .asciz "%s"
+    .p2align 2
+
+_print_number:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    sub sp, sp, #48
+    mov x1, x0          // number to 2nd arg
+    adr x0, .fmt_num
+    bl printf
+    add sp, sp, #48
+    ldp x29, x30, [sp], #16
+    ret
+    .p2align 3
+.fmt_num: .asciz "%lld"
+    .p2align 2
+
+_print_hex:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    sub sp, sp, #48
+    mov x1, x0
+    adr x0, .fmt_hex
+    bl printf
+    add sp, sp, #48
+    ldp x29, x30, [sp], #16
+    ret
+    .p2align 3
+.fmt_hex: .asciz "0x%llX"
+    .p2align 2''',
+            'externs': {'printf'},
+            'requires': []
+        }
+        
+        self.functions['println'] = {
+            'code': '',
+            'data': ['_newline_str: .asciz "\\n"'],
+            'requires': ['print']
+        }
+        
+        # === INPUT FUNCTIONS ===
+        self.functions['scan'] = {
+            'code': '''_scan_string:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    sub sp, sp, #64     // shadow space + locals
+    // x0=buffer, x1=maxlen
+    mov x19, x0         // save buffer
+    mov x20, x1         // save maxlen
+    
+    adrp x0, _stdin_handle
+    add x0, x0, :lo12:_stdin_handle
+    ldr x0, [x0]        // hConsoleInput
+    mov x1, x19         // lpBuffer
+    mov x2, x20         // nNumberOfCharsToRead
+    add x3, sp, #48     // lpNumberOfCharsRead (on stack)
+    mov x4, #0          // lpReserved
+    str x4, [sp, #32]   // 5th arg on stack
+    bl ReadConsoleA
+    
+    ldr x0, [sp, #48]   // bytes read
+    cmp x0, #0
+    ble .done
+    
+    // Trim newline
+    add x1, x19, x0
+    sub x1, x1, #1      // last char
+    ldrb w2, [x1]
+    cmp w2, #10         // \n
+    b.ne .check_cr
+    strb wzr, [x1]
+    sub x1, x1, #1
+.check_cr:
+    ldrb w2, [x1]
+    cmp w2, #13         // \r
+    b.ne .done
+    strb wzr, [x1]
+    
+.done:
+    add sp, sp, #64
+    ldp x29, x30, [sp], #16
+    ret''',
+            'bss': ['_bytes_read: .skip 8'],
+            'externs': {'ReadConsoleA'}
+        }
+
+        self._init_common_string_ops_arm64()
+        self._init_common_math_ops_arm64()
+        self._init_common_memory_ops_arm64()
+        
+        # === RANDOM/SLEEP ===
+        self.functions['rand'] = {
+            'code': '''_rand:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    sub sp, sp, #32
+    bl rand
+    add sp, sp, #32
+    ldp x29, x30, [sp], #16
+    ret''',
+            'externs': {'rand'}
+        }
+        
         self.functions['sleep'] = {
             'code': '''_sleep:
-    push rbp
-    mov rbp, rsp
-    sub rsp, 32
-    call Sleep
-    add rsp, 32
-    pop rbp
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    sub sp, sp, #32
+    bl Sleep
+    add sp, sp, #32
+    ldp x29, x30, [sp], #16
     ret''',
             'externs': {'Sleep'}
+        }
+
+    def _init_common_string_ops_arm64(self):
+        self.functions['strlen'] = {
+            'code': '''_strlen:
+    mov x1, x0
+    mov x0, #0
+.loop:
+    ldrb w2, [x1], #1
+    cbz w2, .done
+    add x0, x0, #1
+    b .loop
+.done:
+    ret''',
+            'externs': set()
+        }
+        
+        self.functions['strcmp'] = {
+            'code': '''_strcmp:
+.loop:
+    ldrb w2, [x0], #1
+    ldrb w3, [x1], #1
+    cmp w2, w3
+    b.ne .neq
+    cbz w2, .eq
+    b .loop
+.eq:
+    mov x0, #0
+    ret
+.neq:
+    sub x0, x2, x3
+    ret''',
+            'externs': set()
+        }
+        
+        self.functions['strcat'] = {
+            'code': '''_strcat:
+    mov x2, x0
+.find_end:
+    ldrb w3, [x2], #1
+    cbnz w3, .find_end
+    sub x2, x2, #1
+.copy:
+    ldrb w3, [x1], #1
+    strb w3, [x2], #1
+    cbnz w3, .copy
+    ret''',
+            'externs': set()
+        }
+        
+        self.functions['scanint'] = {
+            'code': '''_scanint:
+    ; Placeholder for scanint on ARM64
+    ret''',
+            'externs': set()
+        }
+
+    def _init_common_math_ops_arm64(self):
+        self.functions['abs'] = {
+            'code': '''_abs:
+    cmp x0, #0
+    cneg x0, x0, mi
+    ret''',
+            'externs': set()
+        }
+        
+        self.functions['min'] = {
+            'code': '''_min:
+    cmp x0, x1
+    csel x0, x0, x1, le
+    ret''',
+            'externs': set()
+        }
+        
+        self.functions['max'] = {
+            'code': '''_max:
+    cmp x0, x1
+    csel x0, x0, x1, ge
+    ret''',
+            'externs': set()
+        }
+        
+        self.functions['pow'] = {
+            'code': '''_pow:
+    ; Simple integer power x0^x1
+    mov x2, x0
+    mov x0, #1
+    cbz x1, .done
+.loop:
+    mul x0, x0, x2
+    sub x1, x1, #1
+    cbnz x1, .loop
+.done:
+    ret''',
+            'externs': set()
+        }
+        
+        self.functions['arraysum'] = {
+            'code': '''_arraysum:
+    mov x2, x0
+    mov x0, #0
+    cbz x1, .done
+.loop:
+    ldr x3, [x2], #8
+    add x0, x0, x3
+    sub x1, x1, #1
+    cbnz x1, .loop
+.done:
+    ret''',
+            'externs': set()
+        }
+
+    def _init_common_memory_ops_arm64(self):
+        self.functions['memset'] = {
+            'code': '''_memset:
+    ; x0=dest, x1=val, x2=count
+    mov x3, x0
+    cbz x2, .done
+.loop:
+    strb w1, [x3], #1
+    sub x2, x2, #1
+    cbnz x2, .loop
+.done:
+    ret''',
+            'externs': set()
+        }
+        
+        self.functions['memcpy'] = {
+            'code': '''_memcpy:
+    ; x0=dest, x1=src, x2=count
+    mov x3, x0
+    cbz x2, .done
+.loop:
+    ldrb w4, [x1], #1
+    strb w4, [x3], #1
+    sub x2, x2, #1
+    cbnz x2, .loop
+.done:
+    ret''',
+            'externs': set()
+        }
+        
+        self.functions['arrayfill'] = {
+            'code': '''_arrayfill:
+    ; x0=arr, x1=count, x2=val
+    cbz x1, .done
+.loop:
+    str x2, [x0], #8
+    sub x1, x1, #1
+    cbnz x1, .loop
+.done:
+    ret''',
+            'externs': set()
+        }
+        
+        self.functions['arraycopy'] = {
+            'code': '''_arraycopy:
+    ; x0=dest, x1=src, x2=count
+    cbz x2, .done
+.loop:
+    ldr x3, [x1], #8
+    str x3, [x0], #8
+    sub x2, x2, #1
+    cbnz x2, .loop
+.done:
+    ret''',
+            'externs': set()
         }
 
     def _init_common_string_ops(self):
