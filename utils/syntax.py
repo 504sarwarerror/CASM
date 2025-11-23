@@ -112,7 +112,8 @@ class Compiler:
         self.output_file = output_file or default_out
         self.verbose = verbose
         self.target = kwargs.get('target', 'windows')
-        self.stdlib = StandardLibrary(target=self.target)
+        self.arch = kwargs.get('arch', 'x86_64')
+        self.stdlib = StandardLibrary(target=self.target, arch=self.arch)
 
     def log(self, message):
         if self.verbose:
@@ -190,7 +191,7 @@ class Compiler:
 
             _included.add(inc_abspath)
             # compile included file and write its generated asm to the build dir
-            child_compiler = Compiler(inc_abspath, output_file=None, verbose=self.verbose, target=self.target)
+            child_compiler = Compiler(inc_abspath, output_file=None, verbose=self.verbose, target=self.target, arch=self.arch)
             # ensure child uses same included-set to avoid cycles
             ok = child_compiler.compile(_included)
             if not ok:
@@ -236,7 +237,7 @@ class Compiler:
 
             self.log("Generating assembly code...")
             try:
-                codegen = CodeGenerator(tokens, target=self.target)
+                codegen = CodeGenerator(tokens, target=self.target, arch=self.arch)
                 generated_code, data_section, stdlib_used = codegen.generate()
                 self.log(f"    Generated {len(generated_code.split(chr(10)))} lines")
                 self.log(f"    Using stdlib functions: {', '.join(stdlib_used) if stdlib_used else 'none'}")
@@ -400,10 +401,13 @@ class Compiler:
         # stdio helpers merely because a high-level `call` appeared in the
         # generated code. If callers want the wrapper, they must write
         # `extern <name>` in the source.
+        # Merge explicitly requested externs with implicitly used stdlib functions
+        # from the code generation phase.
+        combined_used = set()
         if user_externs:
-            combined_used = set(n.lower() for n in user_externs if isinstance(n, str))
-        else:
-            combined_used = set()
+            combined_used.update(n.lower() for n in user_externs if isinstance(n, str))
+        if stdlib_used:
+            combined_used.update(n.lower() for n in stdlib_used)
 
         # Use formatter to produce final merged content
         deps = self.stdlib.get_dependencies(combined_used)

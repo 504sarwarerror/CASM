@@ -1,586 +1,299 @@
-A contemporary high-level front-end for NASM (Windows x64 focused) that accepts a C-like/assembly hybrid language and generates NASM assembly code. Write high-level constructs like loops, and conditionals while maintaining the power of assembly.
+A contemporary, high-level assembly compiler with cross-platform support. Write assembly with high-level constructs (loops, conditionals, functions) while maintaining the power and control of assembly language.
 
-## Features
+## Key Features
 
-- **High-level constructs**: `if/elif/else`, `for`, `while`, `print`
-- **Built-in standard library**: I/O, strings, math, arrays, memory operations
-- **Seamless inline assembly passthrough**
-- **C file support**: Write inline assembly in C files with automatic AT&T syntax conversion
-- **Cross-platform builds**: Native support for Windows, Linux, and macOS targets
-- **Automatic register allocation** for parameters and temporaries
+- **High-Level Constructs**: `if/elif/else`, `for`, `while`, `func`, nested loops
+- **Backend Abstraction**: Modular architecture supporting multiple platforms
+- **Cross-Platform**: Native support for Windows, Linux, and macOS (x86-64)
+- **ARM64 Support**: In-progress native Apple Silicon support
+- **Standard Library**: Automatic dependency injection - only includes what you use
+- **Inline Assembly**: Seamless NASM passthrough for low-level control
+- **Smart Register Allocation**: Automatic allocation with callee-saved register preference
+
+### Enhanced Cross-Compilation
+- Windows (x86-64) - Working
+- macOS (x86-64) - Working
+- Linux (x86-64) - Partial (requires cross-linker)
+- macOS (ARM64) - In progress
 
 ## Prerequisites
 
 - **Python 3.8+**
-- **NASM** - for assembling produced `.asm` files into object files
-- **GCC/Clang** - for compiling C files and linking executables
-- **Cross-platform toolchains** (for targeting different platforms):
-  - **Windows target**: MinGW-w64 (`x86_64-w64-mingw32-gcc`)
-  - **macOS target**: Xcode Command Line Tools (`clang`)
-  - **Linux target**: GCC or Clang
-  - **macOS cross-compile to Windows**: `brew install mingw-w64 nasm`
+- **NASM** - Assembly generation (x86-64)
+- **GCC/Clang** - Linking executables
+- **Cross-platform toolchains** (optional):
+  - Windows: MinGW-w64 (`brew install mingw-w64`)
+  - macOS: Xcode Command Line Tools
+  - ARM64: Clang with ARM64 support
 
 ## Quick Start
 
 ### Basic Usage
 
 ```bash
-# Compile to assembly only
-python3 main.py examples/hello.asm -o out_compiled.asm
-
-# Compile, build, and run
+# Compile and run
 python3 main.py examples/hello.asm --build --run
 
-# Compile C file with inline assembly
-python3 main.py mycode.c --build --run
+# Cross-compile for different platforms
+python3 main.py code.asm --build --target windows
+python3 main.py code.asm --build --target macos
+python3 main.py code.asm --build --target linux
 
-# Cross-platform compilation
-python3 main.py examples/hello.asm --build --target macos
-python3 main.py examples/hello.asm --build --target linux
-python3 main.py examples/hello.asm --build --target windows
+# Specify architecture (x86_64 or arm64)
+python3 main.py code.asm --build --target macos --arch arm64
 ```
 
-### Install globally (optional)
-
-You can install CASM system-wide using the provided installer script `inshall.sh` (optional). The installer will place a small wrapper/entrypoint in a system `PATH` directory (for example `/usr/local/bin`) so you can run the compiler from anywhere using the `casm` command.
-
-Basic usage:
+### Global Installation (Optional)
 
 ```bash
-# make the installer executable
 chmod +x inshall.sh
-
-# run the installer (may require sudo to write to /usr/local/bin)
 sudo ./inshall.sh
 
-# afterwards you can run casm globally
+# Use globally
 casm examples/hello.asm --build --run
 ```
 
-What the installer does (typical behavior):
-
-- Copies an executable wrapper or entrypoint script to `/usr/local/bin/casm` (or another destination you pass to the script).
-- Makes the wrapper executable and ensures the `build/` directory exists under the project when run from a repository clone.
-- Optionally updates permissions and prints instructions for uninstallation.
-
-If you prefer a manual install instead of using the script, you can create a symlink yourself:
-
-```bash
-# from the project root
-sudo ln -s "$(pwd)/main.py" /usr/local/bin/casm
-sudo chmod +x /usr/local/bin/casm
-```
-
-Notes:
-
-- The installer is optional and provided as a convenience. Review the `inshall.sh` script before running it and adjust the destination if you do not want to write to `/usr/local/bin`.
-- On systems where `/usr/local/bin` is not in the PATH for non-login shells, you may need to add it or choose a different location.
-
 ## Language Reference
 
-### File Structure
+### Control Flow
 
-Files are plain text assembly-like source files. The compiler recognizes:
-
-- **High-level statements** - Recognized keywords that generate assembly
-- **NASM passthrough** - Lines not starting with high-level keywords are emitted as raw NASM
-
-### NASM Sections
-
-Standard NASM sections are forwarded to the generated output:
-
+#### IF/ELIF/ELSE
 ```nasm
-section .data    ; Initialized data (labels, strings)
-section .bss     ; Uninitialized storage (resb/resq/etc.)
-section .text    ; Assembly code and high-level constructs
+if rax == 10
+    call println "Equal to 10"
+elif rax > 10
+    call println "Greater than 10"
+else
+    call println "Less than 10"
+endif
 ```
 
-## High-Level Constructs
+#### FOR Loops
+```nasm
+; Simple range
+for i = 0, 5
+    call println i
+endfor
 
-### 1. Overview
+; Nested loops
+for outer = 1, 3
+    for inner = 1, 2
+        call print inner
+    endfor
+endfor
+```
 
-This compiler exposes a small set of high-level control-flow constructs while allowing raw NASM lines to pass through unchanged. The high-level constructs are intentionally simple and operate on registers, immediates, identifiers and simple memory operands.
+#### WHILE Loops
+```nasm
+mov rbx, 3
+while rbx > 0
+    call println rbx
+    dec rbx
+endwhile
+```
 
-Key rules:
+### Functions
 
-- Operands may be registers (e.g. `rax`, `al`), identifiers (labels/variables), numeric immediates, memory expressions (`[ident]` or `dword [ident]`), or string literals (quoted).
-- String literals are emitted into the `.data` section as generated labels when used as arguments to stdlib functions (e.g. `call print "Hello"`).
-- Comparisons support immediates and register/memory operands. A small convenience: comparing a single-character string literal to a byte-sized register (e.g. `if al == "."`) is supported — the compiler converts `"."` to the ASCII immediate `46` so the emitted `cmp` is valid.
+```nasm
+func greet(name)
+    call printf("Hello, %s\n", name)
+    return
+endfunc
 
-### 2. Printing & I/O
+func calculate_sum(a, b)
+    mov rax, a
+    add rax, b
+    return
+endfunc
 
-Use the high-level `call` form to invoke runtime I/O helpers.
+; Call functions
+call greet("World")
+```
+
+### I/O Operations
 
 ```nasm
 ; Print without newline
 call print "Hello"
 
-; Print with newline
+; Print with newline  
 call println "Hello, World!"
 
-; Print register value
+; Print register values
 call println rax
 
-; Print blank newline
-call println
+; Printf with formatting
+call printf("Value: %d\n", 42)
 ```
 
-Notes:
+### Inline Assembly
 
-- When you pass a string literal the compiler creates a data label and loads its address for you.
-- When you pass a register or identifier the compiler moves the value into the appropriate calling-register before invoking the helper.
-
-### 3. Control Flow (if / elif / else)
-
-Syntax:
-
-```nasm
-if <left> <comp> <right>
-    ; true block
-elif <left> <comp> <right>
-    ; elif block
-else
-    ; else block
-endif
-```
-
-Where:
-
-- `<left>` / `<right>` are operands: registers, identifiers, numbers, or (in some cases) string literals.
-- `<comp>` is one of: `==`, `!=`, `<`, `>`, `<=`, `>=`.
-
-Examples:
-
-```nasm
-if rax == 0
-    call println "zero"
-elif rax == 1
-    call println "one"
-else
-    call println "other"
-endif
-
-; Single-character string comparison against a byte register
-if al == "."
-    ; this is treated as `cmp al, 46` ('.' == 46)
-endif
-```
-
-Behavior details:
-
-- If both sides are numeric immediates (e.g. `if 1 == 0`) the compiler evaluates the condition at compile-time and may elide the branch.
-- If one side is a register or memory operand the compiler emits a `cmp` followed by an appropriate conditional jump.
-- Multi-character string comparisons are not supported by emitting a direct `cmp` to immediates — they require a runtime string-compare helper. See the "String comparisons" note below.
-
-String comparisons:
-
-- Only single-character string literals compared to a register are automatically converted to their ASCII numeric value.
-- Comparing two strings (or a multi-character literal against a buffer/identifier) requires a runtime helper such as `strcmp`. You can call such helpers from high-level code, but you must ensure the helper is available (see "Stdlib & externs" below).
-
-### 4. For Loops
-
-Syntax (inclusive-range):
-
-```nasm
-for <var> = <start>, <end>
-    ; loop body
-endfor
-```
-
-Alternative comparison-style:
-
-```nasm
-for <var> <comp> <operand>
-    ; treated as start=0, end=<operand>
-endfor
-```
-
-Examples:
-
-```nasm
-for rcx = 1, 3
-    call println rcx
-endfor
-
-; Using a specific register name (try to request r12d as loop counter)
-for r12d = 0, [n_vis_tiles_x]
-    ; loop body
-endfor
-```
-
-Register allocation notes:
-
-- The compiler will try to reserve the register you specify (e.g. `r12d`) when possible. If the requested register is unavailable because the compiler already used it for other mappings, the allocator will choose an alternative callee-saved register (e.g. `r9d`). If you require strict use of a particular register, avoid conflicting uses elsewhere in the function or use raw assembly lines to manage registers explicitly.
-- By default the compiler prefers callee-saved registers (r8..r15, rbx) for loop counters so they survive function calls inside the loop body.
-
-### 5. While Loops
-
-Syntax:
-
-```nasm
-while <left> <comp> <right>
-    ; loop body
-endwhile
-```
-
-Example:
-
-```nasm
-while rbx > 0
-    dec rbx
-endwhile
-```
-
-The same operand and comparison rules from `if` apply to `while`.
-
-### 6. Loop Control
-
-Inside loops you may use:
-
-```nasm
-break       ; Exit the loop immediately
-continue    ; Skip to next iteration
-```
-
-These keywords are validated by the compiler and generate the appropriate jumps.
-
-### 7. Variables & Registers
-
-- Use registers as your primary storage (`rax`, `rbx`, `rcx`, `al`, `r12d`, ...).
-- The compiler performs simple register allocation for loop variables and function parameters; for predictable register usage prefer explicit raw assembly where needed.
-
-### 8. Inline Assembly
-
-Any line not recognized as a high-level keyword is passed through verbatim. This lets you drop down to raw NASM for performance-sensitive code.
+Any line not recognized as a high-level keyword passes through to NASM:
 
 ```nasm
 section .text
-    mov rax, 5          ; Raw NASM instruction
-    add rax, rbx        ; Another raw instruction
-    call println rax    ; High-level call
+    mov rax, 5          ; Raw NASM
+    add rax, rbx        ; Raw NASM
+    call println rax    ; High-level
 ```
 
-## Standard Library
-
-The compiler automatically injects only the standard library routines you actually use. No bloat.
-
-### I/O Functions
-
-| Function  | Description                        |
-| --------- | ---------------------------------- |
-| `print`   | Print string/value without newline |
-| `println` | Print string/value with newline    |
-| `scan`    | Read string input                  |
-| `scanint` | Read integer input                 |
-
-Important: including stdlib helper implementations in the generated asm
-file requires an explicit `extern` declaration in your source. For
-example, to ensure the `print` helper is defined in the output, add this
-near the top of your file:
-
-```nasm
-extern print
-extern println
-```
-
-This repository's build step only emits stdlib wrapper implementations when
-the user explicitly declares them with `extern`. This avoids auto-defining
-library stubs unexpectedly when analyzing multiple sources or included files.
-
-### String Functions
-
-| Function | Description         |
-| -------- | ------------------- |
-| `strlen` | Get string length   |
-| `strcpy` | Copy string         |
-| `strcmp` | Compare strings     |
-| `strcat` | Concatenate strings |
-
-### Math Functions
-
-| Function | Description           |
-| -------- | --------------------- |
-| `abs`    | Absolute value        |
-| `min`    | Minimum of two values |
-| `max`    | Maximum of two values |
-| `pow`    | Power/exponentiation  |
-
-### Array Functions
-
-| Function    | Description           |
-| ----------- | --------------------- |
-| `arraysum`  | Sum array elements    |
-| `arrayfill` | Fill array with value |
-| `arraycopy` | Copy array            |
-
-### Memory Functions
-
-| Function | Description        |
-| -------- | ------------------ |
-| `memset` | Set memory region  |
-| `memcpy` | Copy memory region |
-
-### Utility Functions
-
-| Function | Description            |
-| -------- | ---------------------- |
-| `rand`   | Generate random number |
-| `sleep`  | Sleep/delay execution  |
-
-## Examples
-
-### Example 1: Simple Function and Call
-
-```nasm
-func greet(name)
-    call print "Hello, "
-    call println name
-    return
-endfunc
-
-call greet("world")
-```
-
-### Example 2: For Loop
-
-```nasm
-for rcx = 1, 3
-    call println rcx
-endfor
-```
-
-**Output:**
-
-```
-1
-2
-3
-```
-
-### Example 3: Inline Assembly Passthrough
-
-```nasm
-section .text
-    mov rax, 5      ; Raw NASM instruction
-    add rax, 10     ; Another raw instruction
-    call println rax ; High-level construct
-```
-
-### Example 4: Conditional Logic
-
-```nasm
-mov rax, 42
-
-if rax > 40
-    call println "Greater than 40"
-elif rax > 20
-    call println "Greater than 20"
-else
-    call println "20 or less"
-endif
-```
-
-## C File Support with Inline Assembly
-
-CASM now supports compiling C files that contain inline x86-64 assembly! This feature automatically converts Intel syntax assembly to AT&T syntax for GCC/Clang inline assembly.
-
-### How It Works
-
-1. Write your C code with inline assembly using Intel syntax (NASM-style)
-2. CASM detects assembly instructions and converts them to GCC-compatible inline assembly
-3. The converted code is compiled using GCC/Clang
-
-### Example
-
-```c
-#include <stdio.h>
-
-int main() {
-    int result = 0;
-    
-    // Write assembly using Intel syntax
-    mov rax, 42
-    add rax, 8
-    mov result, rax
-    
-    printf("Result: %d\n", result);
-    return 0;
-}
-```
-
-CASM automatically converts this to:
-
-```c
-#include <stdio.h>
-
-int main() {
-    int result = 0;
-    
-    __asm__(
-        "movq $42, %0;"
-        "addq $8, %0;"
-        : "+r"(result)
-        : 
-        : 
-    );
-    
-    printf("Result: %d\n", result);
-    return 0;
-}
-```
-
-### Usage
-
-```bash
-# Compile and run a C file with inline assembly
-python3 main.py mycode.c --build --run
-
-# Cross-compile for Windows from macOS/Linux
-python3 main.py mycode.c --build --target windows
-```
-
-### Features
-
-- **Automatic syntax conversion**: Intel → AT&T syntax
-- **Smart variable tracking**: Automatically determines input/output constraints
-- **Register clobber detection**: Tracks which registers are modified
-- **Memory operand conversion**: Handles complex addressing modes
-- **SIMD support**: Recognizes SSE/AVX instructions
-
-## Cross-Platform Support
-
-CASM supports building executables for multiple platforms:
-
-### Supported Targets
-
-- **Windows** (x64): Uses MinGW-w64 for cross-compilation
-- **Linux** (x64): Native GCC/Clang compilation
-- **macOS** (x64): Native Clang compilation
-
-### Target Selection
-
-Use the `--target` flag to specify your target platform:
-
-```bash
-# Build for Windows (default)
-python3 main.py code.asm --build --target windows
-
-# Build for macOS
-python3 main.py code.asm --build --target macos
-
-# Build for Linux
-python3 main.py code.asm --build --target linux
-```
-
-### Cross-Compilation
-
-**From macOS to Windows:**
-```bash
-# Install MinGW-w64
-brew install mingw-w64 nasm
-
-# Build Windows executable
-python3 main.py code.asm --build --target windows
-```
-
-**From Linux to Windows:**
-```bash
-# Install MinGW-w64
-sudo apt-get install mingw-w64 nasm
-
-# Build Windows executable
-python3 main.py code.asm --build --target windows
-```
-
-### Platform-Specific Notes
-
-- **Windows**: Generates `.exe` files, uses `win64` NASM format
-- **Linux**: Uses `elf64` NASM format
-- **macOS**: Uses `macho64` NASM format with automatic symbol prefixing (`_`)
-
-## Limitations & Caveats
-
-- **Windows API dependencies**: Some stdlib functions assume Windows APIs (`WriteConsoleA`, etc.)
-- **Register allocation**: Simple register allocator may have conflicts with heavy variable usage
-- **String literals**: Automatically emitted into `.data` section with generated labels
-- **C inline assembly**: Only supports x86-64 assembly; complex macros may need manual adjustment
-
-### Adapting for Other Platforms
-
-To target Linux/macOS with the standard library, modify `libs/stdio.py` to use appropriate syscalls or libc functions instead of Windows API calls.
-
-## Project Structure
+### Project Structure
 
 ```
 .
 ├── src/
 │   ├── lexer.py          # Tokenization
-│   ├── token.py          # Token type definitions
-│   └── codegen.py        # Code generation
+│   ├── token.py          # Token definitions
+│   ├── codegen.py        # Code generation
+│   ├── backend.py        # Backend abstraction
+│   └── builder.py        # Assembly & linking
 ├── utils/
-│   └── syntax.py         # Compiler & syntax checker
+│   ├── syntax.py         # Compiler & syntax checker
+│   ├── cli.py            # CLI interface
+│   └── formatter.py      # Output formatting
 ├── libs/
 │   └── stdio.py          # Standard library
 ├── examples/             # Example programs
+├── test_all_features.asm # Comprehensive test suite
 └── main.py              # Entry point
 ```
 
-## Extending the Compiler
+## Standard Library
 
-### Adding New Features
+The compiler automatically injects only the functions you use:
 
-1. **Define tokens**: Add token types in `src/token.py`
-2. **Update lexer**: Modify tokenization logic in `src/lexer.py`
-3. **Update syntax checker**: Add validation in `utils/syntax.py`
-4. **Implement codegen**: Add generation logic in `src/codegen.py`
+### I/O Functions
+- `print` - Print without newline
+- `println` - Print with newline
+- `scan` - Read string input
+- `scanint` - Read integer input
 
-### Adding Standard Library Functions
+### String Functions
+- `strlen` - String length
+- `strcpy` - Copy string
+- `strcmp` - Compare strings
+- `strcat` - Concatenate strings
 
-Add new functions to `libs/stdio.py` following the existing pattern. The compiler will automatically inject them when used.
+### Math Functions
+- `abs` - Absolute value
+- `min` - Minimum of two values
+- `max` - Maximum of two values
+- `pow` - Power/exponentiation
+
+### Memory Functions
+- `memset` - Set memory region
+- `memcpy` - Copy memory region
+
+## Cross-Platform Support
+
+### Platform Matrix
+
+| Platform | Arch    | Compile | Link | Execute |
+|----------|---------|---------|------|---------|
+| Windows  | x86-64  | Yes     | Yes  | Yes     |
+| macOS    | x86-64  | Yes     | Yes  | Yes     |
+| Linux    | x86-64  | Yes     | Partial | -    |
+| macOS    | ARM64   | Partial | Partial | Partial |
+
+### Cross-Compilation Examples
+
+```bash
+# From macOS to Windows
+brew install mingw-w64 nasm
+python3 main.py code.asm --build --target windows
+
+# Native macOS
+python3 main.py code.asm --build --target macos
+
+# ARM64 (in progress)
+python3 main.py code.asm --build --target macos --arch arm64
+```
+
+## Advanced Features
+
+### Register Allocation
+- Automatic allocation for loop variables and parameters
+- Prefers callee-saved registers (r12-r15, rbx) for loop counters
+- Prevents register clobbering across function calls
+
+### String Handling
+- Automatic `.data` section generation for string literals
+- Single-character string comparisons converted to ASCII
+- Support for multi-line strings with escape sequences
+
+### Debug Mode
+```bash
+python3 main.py code.asm --build --debug
+```
+Generates debug symbols for GDB/LLDB debugging.
 
 ## Troubleshooting
 
-### Common Issues
+### NASM not found
+```bash
+# macOS
+brew install nasm
 
-**Problem**: `nasm: command not found`  
-**Solution**: Install NASM for your platform:
+# Linux
+sudo apt-get install nasm
 
-- Windows: Download from [nasm.us](https://www.nasm.us/)
-- macOS: `brew install nasm`
-- Linux: `sudo apt-get install nasm` or `sudo yum install nasm`
+# Windows
+# Download from https://www.nasm.us/
+```
 
-**Problem**: Linker errors during build  
-**Solution**: Ensure you have a working C compiler/linker:
+### Linker errors
+Ensure you have a working C compiler:
+```bash
+# macOS
+xcode-select --install
 
-- Windows: Install Visual Studio Build Tools or MinGW-w64
-- macOS/Linux: Install Xcode Command Line Tools or GCC
+# Linux
+sudo apt-get install build-essential
+```
 
-**Problem**: Compilation succeeds but executable doesn't run  
-**Solution**: Verify your target platform matches your execution environment (Windows x64)
+### Windows executable won't run
+Use Wine on macOS/Linux:
+```bash
+wine build/program.exe
+```
+
+## Future Roadmap
+
+- Complete ARM64 standard library
+- Implement `break` and `continue` statements
+- Add array and pointer support
+- Implement proper return value handling
+- Add file I/O operations
+- Memory allocation functions
+- Optimization passes
 
 ## Contributing
 
-Contributions are welcome! Areas for improvement:
+Contributions welcome! Areas for improvement:
 
-- **Lexer enhancements**: Better error messages, more token types
-- **Parser robustness**: Edge case handling, error recovery
-- **Code generation**: Improved register allocation, optimization passes
-- **Cross-platform support**: Linux/macOS stdlib implementations
-- **Documentation**: More examples, tutorials
+- **ARM64 Support**: Complete stdlib implementation
+- **Optimization**: Register allocation, dead code elimination
+- **Features**: Arrays, pointers, structs
+- **Documentation**: More examples and tutorials
+- **Testing**: Additional test cases
 
 ### How to Contribute
 
 1. Fork the repository
 2. Create a feature branch
-3. Make your changes with tests
+3. Add tests for new features
 4. Submit a pull request
 
 ## License
 
-This project is a small experimental compiler front-end. See LICENSE file for details.
+Experimental compiler project. See LICENSE for details.
 
 ## Contact
 
-- Issues: Open an issue on the project repository
-- Pull Requests: Contributions welcome
-- Questions: Use the discussion board or issues
+- **Issues**: Open an issue on GitHub
+- **Pull Requests**: Contributions welcome
+- **Questions**: Use discussions or issues
+
+---
+
+Made with care for assembly enthusiasts

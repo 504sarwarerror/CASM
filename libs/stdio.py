@@ -1,7 +1,8 @@
 class StandardLibrary:
     
-    def __init__(self, target='windows'):
+    def __init__(self, target='windows', arch='x86_64'):
         self.target = target
+        self.arch = arch
         self.functions = {}
         self._init_library()
     
@@ -62,8 +63,51 @@ class StandardLibrary:
         }
 
         # === PRINT FUNCTIONS ===
-        self.functions['print'] = {
-            'code': '''_print_string:
+        if self.arch == 'arm64':
+            # ARM64 version using printf from libc
+            self.functions['print'] = {
+                'code': '''_print_string:
+    ; x0 has string pointer
+    ; printf("%s", str)
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    mov x1, x0          ; string to 2nd arg
+    adrp x0, .fmt_str@PAGE
+    add x0, x0, .fmt_str@PAGEOFF
+    bl _printf
+    ldp x29, x30, [sp], #16
+    ret
+.fmt_str: .asciz "%s"
+
+_print_number:
+    ; x0 has number
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    mov x1, x0          ; number to 2nd arg
+    adrp x0, .fmt_num@PAGE
+    add x0, x0, .fmt_num@PAGEOFF
+    bl _printf
+    ldp x29, x30, [sp], #16
+    ret
+.fmt_num: .asciz "%lld"
+
+_print_hex:
+    stp x29, x30, [sp, #-16]!
+    mov x29, sp
+    mov x1, x0
+    adrp x0, .fmt_hex@PAGE
+    add x0, x0, .fmt_hex@PAGEOFF
+    bl _printf
+    ldp x29, x30, [sp], #16
+    ret
+.fmt_hex: .asciz "0x%llX"''',
+                'externs': {'printf'},
+                'requires': ['initstdio']
+            }
+        else:
+            # x86-64 version
+            self.functions['print'] = {
+                'code': '''_print_string:
     ; RDI/RCX has string pointer
     ; printf("%s", str)
     sub rsp, 8
@@ -95,15 +139,23 @@ _print_hex:
     add rsp, 8
     ret
 .fmt db "0x%llX", 0''',
-            'externs': {'printf'},
-            'requires': ['initstdio']
-        }
+                'externs': {'printf'},
+                'requires': ['initstdio']
+            }
 
-        self.functions['println'] = {
-            'code': '',
-            'data': ['_newline_str db 10, 0'],
-            'requires': ['print']
-        }
+
+        if self.arch == 'arm64':
+            self.functions['println'] = {
+                'code': '',
+                'data': ['_newline_str: .asciz "\\n"'],
+                'requires': ['print']
+            }
+        else:
+            self.functions['println'] = {
+                'code': '',
+                'data': ['_newline_str db 10, 0'],
+                'requires': ['print']
+            }
 
         # === INPUT FUNCTIONS ===
         self.functions['scan'] = {
@@ -207,59 +259,23 @@ _print_hex:
             'code': '''_print_string:
     push rbp
     mov rbp, rsp
-    sub rsp, 64
-    push r12
-    push r13
-    mov r12, rcx
-    xor rax, rax
-    mov rdi, rcx
-.count:
-    cmp byte [rdi], 0
-    je .write
-    inc rax
-    inc rdi
-    jmp .count
-.write:
-    mov r13, rax
-    test r13, r13
-    jz .exit
-    mov rcx, [rel _stdout_handle]
-    mov rdx, r12
-    mov r8, r13
-    lea r9, [rel _bytes_written]
-    mov qword [rsp+32], 0
-    call WriteConsoleA
-.exit:
-    pop r13
-    pop r12
-    add rsp, 64
+    sub rsp, 32
+    mov rdx, rcx  ; string to 2nd arg (rdx)
+    lea rcx, [rel .fmt] ; format to 1st arg (rcx)
+    call printf
+    add rsp, 32
     pop rbp
     ret
+.fmt db "%s", 0
 
 _print_number:
     push rbp
     mov rbp, rsp
-    sub rsp, 64
-    push r12
-    mov r12, rcx
-    test r12, r12
-    jns .pos
-    push r12
-    mov byte [rsp], 45
-    mov byte [rsp+1], 0
-    lea rcx, [rsp]
-    call _print_string
-    pop r12
-    neg r12
-.pos:
-    lea rcx, [rel _number_buffer]
-    lea rdx, [rel .fmt]
-    mov r8, r12
-    call sprintf
-    lea rcx, [rel _number_buffer]
-    call _print_string
-    pop r12
-    add rsp, 64
+    sub rsp, 32
+    mov rdx, rcx  ; number to 2nd arg (rdx)
+    lea rcx, [rel .fmt] ; format to 1st arg (rcx)
+    call printf
+    add rsp, 32
     pop rbp
     ret
 .fmt db "%lld", 0
@@ -267,20 +283,16 @@ _print_number:
 _print_hex:
     push rbp
     mov rbp, rsp
-    sub rsp, 64
-    lea rcx, [rel _number_buffer]
-    lea rdx, [rel .fmt]
-    mov r8, rcx
-    call sprintf
-    lea rcx, [rel _number_buffer]
-    call _print_string
-    add rsp, 64
+    sub rsp, 32
+    mov rdx, rcx
+    lea rcx, [rel .fmt]
+    call printf
+    add rsp, 32
     pop rbp
     ret
 .fmt db "0x%llX", 0''',
-            'bss': ['_bytes_written resd 1', '_number_buffer resb 64'],
-            'externs': {'WriteConsoleA', 'sprintf'},
-            'requires': ['initstdio']
+            'externs': {'printf'},
+            'requires': []
         }
         
         self.functions['println'] = {

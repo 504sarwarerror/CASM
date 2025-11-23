@@ -6,10 +6,11 @@ from utils.cli import CLI
 
 
 class Builder:
-    def __init__(self, compiled_file, verbose=False, target='windows', linker_flags='', debug=False):
+    def __init__(self, compiled_file, verbose=False, target='windows', linker_flags='', debug=False, arch='x86_64'):
         self.compiled_file = compiled_file
         self.verbose = verbose
         self.target = target  # 'windows', 'linux', 'macos'
+        self.arch = arch  # 'x86_64', 'arm64'
         # linker_flags is a single string (e.g. "-L/path -lSDL2 -lSDL2main -mwindows")
         self.linker_flags = linker_flags or ''
         # When debug=True, pass NASM debug flags (e.g. -gcv8 -F cv8) for richer
@@ -117,43 +118,70 @@ class Builder:
         return True
     
     def assemble_file(self, asm_file, obj_file):
-        # Choose NASM output format based on target
-        fmt = 'win64' if self.target == 'windows' else ('elf64' if self.target == 'linux' else 'macho64')
-        # Build base command
-        nasm_cmd = ['nasm', '-f', fmt]
-        # If requested, add NASM debug flags for Windows (cv8) which produces
-        # CodeView debug information compatible with many Windows debuggers.
-        if self.debug and self.target == 'windows':
-            nasm_cmd.extend(['-gcv8', '-F', 'cv8'])
-        
-        # For macOS, add underscore prefix to all globals/externs automatically
-        if self.target == 'macos':
-            nasm_cmd.extend(['--prefix', '_'])
-
-        # Enable multi-pass optimization to resolve label offsets
-        # Use -Ox for maximum optimization passes (needed when --prefix changes label sizes)
-        nasm_cmd.append('-Ox')
-
-        nasm_cmd.extend([asm_file, '-o', obj_file])
-        
-        try:
-            result = subprocess.run(nasm_cmd, capture_output=True, text=True)
+        # ARM64 uses clang as assembler (.s files), x86_64 uses NASM (.asm files)
+        if self.arch == 'arm64':
+            # Use clang to assemble ARM64 .s files
+            clang_cmd = ['clang', '-c', asm_file, '-o', obj_file, '-arch', 'arm64']
+            if self.debug:
+                clang_cmd.append('-g')
             
-            if result.returncode != 0:
-                CLI.error("NASM assembly failed:")
-                print(result.stderr)
+            try:
+                result = subprocess.run(clang_cmd, capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    CLI.error("Clang assembly failed:")
+                    print(result.stderr)
+                    return False
+                
+                return True
+            
+            except FileNotFoundError:
+                CLI.error("Clang not found!")
+                print("    Install Xcode Command Line Tools: xcode-select --install")
                 return False
             
-            return True
-        
-        except FileNotFoundError:
-            CLI.error("NASM not found!")
-            print("    Install from: https://www.nasm.us/")
-            return False
-        
-        except Exception as e:
-            CLI.error(f"Assembly error: {e}")
-            return False
+            except Exception as e:
+                CLI.error(f"Assembly error: {e}")
+                return False
+        else:
+            # x86_64: Use NASM
+            # Choose NASM output format based on target
+            fmt = 'win64' if self.target == 'windows' else ('elf64' if self.target == 'linux' else 'macho64')
+            # Build base command
+            nasm_cmd = ['nasm', '-f', fmt]
+            # If requested, add NASM debug flags for Windows (cv8) which produces
+            # CodeView debug information compatible with many Windows debuggers.
+            if self.debug and self.target == 'windows':
+                nasm_cmd.extend(['-gcv8', '-F', 'cv8'])
+            
+            # For macOS, add underscore prefix to all globals/externs automatically
+            if self.target == 'macos':
+                nasm_cmd.extend(['--prefix', '_'])
+
+            # Enable multi-pass optimization to resolve label offsets
+            # Use -Ox for maximum optimization passes (needed when --prefix changes label sizes)
+            nasm_cmd.append('-Ox')
+
+            nasm_cmd.extend([asm_file, '-o', obj_file])
+            
+            try:
+                result = subprocess.run(nasm_cmd, capture_output=True, text=True)
+                
+                if result.returncode != 0:
+                    CLI.error("NASM assembly failed:")
+                    print(result.stderr)
+                    return False
+                
+                return True
+            
+            except FileNotFoundError:
+                CLI.error("NASM not found!")
+                print("    Install from: https://www.nasm.us/")
+                return False
+            
+            except Exception as e:
+                CLI.error(f"Assembly error: {e}")
+                return False
     
     def link_files(self, obj_file, exe_file):
         # Linking depends on target and toolchain availability

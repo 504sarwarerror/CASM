@@ -131,6 +131,7 @@ class CLI:
             'verbose': False,
             'debug': False,
             'target': 'windows',
+            'arch': 'x86_64',
             'ldflags': '',
             'help': False
         }
@@ -167,6 +168,18 @@ class CLI:
                     i += 2
                 else:
                     CLI.error("--target requires a value (windows, linux, macos)")
+                    return None
+            elif arg == '--arch':
+                if i + 1 < len(args):
+                    requested = args[i + 1].lower()
+                    if requested in ['x86_64', 'arm64']:
+                        config['arch'] = requested
+                    else:
+                        CLI.warning(f"Unknown architecture '{requested}'. Defaulting to 'x86_64'.")
+                        config['arch'] = 'x86_64'
+                    i += 2
+                else:
+                    CLI.error("--arch requires a value (x86_64, arm64)")
                     return None
             elif arg == '--ldflags':
                 # Accept a single string containing linker flags (quote as needed)

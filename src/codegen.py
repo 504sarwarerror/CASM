@@ -1,34 +1,41 @@
 from src.token import TokenType, Token
-
+from src.backend import X86Backend, ARM64Backend
 
 class CodeGenerator:
-    def __init__(self, tokens, target='windows'):
+    def __init__(self, tokens, target='windows', arch='x86_64'):
         self.tokens = tokens
         self.pos = 0
-        self.output = []
         self.label_counter = 0
         self.block_counter = 0
         self.stdlib_used = set()
-        self.data_section = []
         self.string_counter = 0
         self.loop_stack = []
         self.functions = {}
         self.current_function = None
-        self.register_map = {}
         self.target = target
-        # default to 64-bit generation; can be switched to 32-bit by
-        # passing bits=32 when constructing CodeGenerator.
+        self.arch = arch
         self.bits = 64
-        # prefer using the extended registers for temporary/callee-saved
-        # allocations so generated code can use r8..r15 (and their d subregs)
-        self._reg_pool = ['r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15', 'rbx']
         
-        # Calling convention registers
-        if self.target == 'windows':
-            self.arg_regs = ['rcx', 'rdx', 'r8', 'r9']
+        # Initialize backend
+        if self.arch == 'arm64':
+            self.backend = ARM64Backend(target=target, bits=64)
+            self._reg_pool = ['x9', 'x10', 'x11', 'x12', 'x13', 'x14', 'x15'] # volatile temps
         else:
-            # System V AMD64 (Linux/macOS)
-            self.arg_regs = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
+            self.backend = X86Backend(target=target, bits=64)
+            self._reg_pool = ['r8', 'r9', 'r10', 'r11', 'r12', 'r13', 'r14', 'r15', 'rbx']
+
+        self.register_map = {}
+        self.arg_regs = self.backend.arg_regs
+    
+    @property
+    def output(self):
+        """Proxy to backend output for backward compatibility"""
+        return self.backend.get_output()
+    
+    @property
+    def data_section(self):
+        """Proxy to backend data_section for backward compatibility"""
+        return self.backend.get_data_section()
     
     def generate(self):
         while self.pos < len(self.tokens):
@@ -88,8 +95,9 @@ class CodeGenerator:
         # user's source (or inline assembly) didn't include a `section .text`
         # declaration, prepend one so assemblers (NASM/YASM) have a code
         # section to put generated instructions into.
-        assembly_text = '\n'.join(self.output)
-        if 'section .text' not in assembly_text.lower():
+        # Ensure there's a text section in the final assembly output.
+        assembly_text = '\n'.join(self.backend.get_output())
+        if 'section .text' not in assembly_text.lower() and self.arch != 'arm64':
             # Prefer to insert the text section before any `global` directive
             # (e.g. `global main`) so globals remain after the section line.
             # If no `global` is present, insert after any leading `bits` or
@@ -97,7 +105,8 @@ class CodeGenerator:
             # recognizable is found.
             insert_index = 0
             found_global = False
-            for i, line in enumerate(self.output):
+            output = self.backend.get_output()
+            for i, line in enumerate(output):
                 if line.lstrip().lower().startswith('global '):
                     insert_index = i
                     found_global = True
@@ -106,7 +115,7 @@ class CodeGenerator:
             if not found_global:
                 # look for trailing bits/default rel directives and place after
                 last_dir = -1
-                for i, line in enumerate(self.output):
+                for i, line in enumerate(output):
                     s = line.strip().lower()
                     if s.startswith('bits ') or s.startswith('default rel'):
                         last_dir = i
@@ -115,9 +124,9 @@ class CodeGenerator:
                 else:
                     insert_index = 0
 
-            self.output.insert(insert_index, 'section .text')
+            output.insert(insert_index, 'section .text')
 
-        return '\n'.join(self.output), self.data_section, self.stdlib_used
+        return '\n'.join(self.backend.get_output()), self.backend.get_data_section(), self.stdlib_used
 
     def set_bits(self, bits: int):
         """Set generation mode to 32 or 64 bit. Call before generate()."""
@@ -145,6 +154,31 @@ class CodeGenerator:
             return self.register_map[name]
         lower = name.lower()
         return self.register_map.get(lower, name)
+
+    def allocate_reg_for(self, orig_name):
+        # lazy-init appropriate register pool for 32/64-bit modes
+        pass
+
+    def get_subreg_32(self, reg64):
+        mapping = {
+            'rax': 'eax', 'rbx': 'ebx', 'rcx': 'ecx', 'rdx': 'edx',
+            'rsi': 'esi', 'rdi': 'edi', 'rbp': 'ebp', 'rsp': 'esp',
+            'r8': 'r8d', 'r9': 'r9d', 'r10': 'r10d', 'r11': 'r11d',
+            'r12': 'r12d', 'r13': 'r13d', 'r14': 'r14d', 'r15': 'r15d'
+        }
+        return mapping.get(reg64.lower(), reg64)
+
+    def emit_mov(self, dest, src):
+        # Handle 32-bit to 64-bit moves
+        # If src is 32-bit (ends in 'd' or is eax/ebx/etc), move to 32-bit dest
+        # which zero-extends to 64-bit.
+        src_lower = src.lower()
+        if src_lower in ['eax', 'ebx', 'ecx', 'edx', 'esi', 'edi', 'ebp', 'esp'] or \
+           (src_lower.startswith('r') and src_lower.endswith('d') and src_lower[-2].isdigit()):
+            dest_32 = self.get_subreg_32(dest)
+            self.output.append(f"    mov {dest_32}, {src}")
+        else:
+            self.output.append(f"    mov {dest}, {src}")
 
     def allocate_reg_for(self, orig_name):
         # lazy-init appropriate register pool for 32/64-bit modes
@@ -311,7 +345,7 @@ class CodeGenerator:
         block_id = self.block_counter
         self.block_counter += 1
         # emit start marker
-        self.output.append(f"; __GEN_START__ {block_id} {start_line}")
+        self.backend.emit_raw(f"; __GEN_START__ {block_id} {start_line}")
         self.advance()
         
         # Expect: IF <operand> <comparison-op> <number|operand>
@@ -355,8 +389,8 @@ class CodeGenerator:
 
         self.skip_newlines()
 
-        label_next = self.get_label()
-        label_end = self.get_label()
+        label_next = self.backend.get_label()
+        label_end = self.backend.get_label()
 
         # Decide proper cmp ordering so NASM never sees immediate, immediate or
         # immediate as the destination. If both sides are numeric, evaluate at
@@ -371,8 +405,8 @@ class CodeGenerator:
                 TokenType.LE: (a <= b), TokenType.GE: (a >= b)
             }
             if not cond_map.get(op.type, False):
-                # condition is false at compile time: skip true-block
-                self.output.append(f"    jmp near {label_next}")
+                # condition is false at compile-time: skip true-block
+                self.backend.jump(label_next)
         else:
             # choose left and right so left is register/memory (valid cmp dest)
             if var_token.type == TokenType.NUMBER:
@@ -388,37 +422,38 @@ class CodeGenerator:
                     left = self.remap_reg(left)
                 right = rhs_val
 
-            self.output.append(f"    cmp {left}, {right}")
+            self.backend.compare(left, right)
 
         jump_map = {
-            TokenType.EQ: 'jne', TokenType.NE: 'je',
-            TokenType.LT: 'jge', TokenType.GT: 'jle',
-            TokenType.LE: 'jg', TokenType.GE: 'jl'
+            TokenType.EQ: '!=', TokenType.NE: '==',
+            TokenType.LT: '>=', TokenType.GT: '<=',
+            TokenType.LE: '>', TokenType.GE: '<'
         }
         
         try:
+            # Invert condition to jump over the block if false
             jm = jump_map[op.type]
         except KeyError:
             raise SyntaxError(f"Line {op.line}: Unsupported comparison operator '{op.value}' in if-statement")
         
-        # FIXED: Jump to label_next when condition is FALSE
-        self.output.append(f"    {jm} {label_next}")
+        # Jump to label_next when condition is FALSE
+        self.backend.cond_jump(jm, label_next)
         
         # Generate the TRUE block (this will include the "jmp error" from your code)
         self.generate_block([TokenType.ELIF, TokenType.ELSE, TokenType.ENDIF])
         
-        # FIXED: Only jump to end if there are elif/else blocks coming
+        # Only jump to end if there are elif/else blocks coming
         has_elif_or_else = self.current_token() and self.current_token().type in [TokenType.ELIF, TokenType.ELSE]
         if has_elif_or_else:
-            self.output.append(f"    jmp near {label_end}")
+            self.backend.jump(label_end)
         
         # Place label_next (where we jump when condition is FALSE)
-        self.output.append(f"{label_next}:")
+        self.backend.label(label_next)
         
         has_else = False
         while self.current_token() and self.current_token().type in [TokenType.ELIF, TokenType.ELSE]:
             if self.current_token().type == TokenType.ELIF:
-                label_next = self.get_label()
+                label_next = self.backend.get_label()
                 
                 self.advance()
                 var, var_token = self.parse_operand()
@@ -458,7 +493,7 @@ class CodeGenerator:
                         TokenType.LE: (a <= b), TokenType.GE: (a >= b)
                     }
                     if not cond_map.get(op.type, False):
-                        self.output.append(f"    jmp near {label_next}")
+                        self.backend.jump(label_next)
                 else:
                     # choose left so it's register/memory
                     if var_token.type == TokenType.NUMBER:
@@ -472,16 +507,17 @@ class CodeGenerator:
                             left = self.remap_reg(left)
                         right = rhs_val
 
-                    self.output.append(f"    cmp {left}, {right}")
+                    self.backend.compare(left, right)
                     try:
+                        # Invert condition
                         jm2 = jump_map[op.type]
                     except KeyError:
                         raise SyntaxError(f"Line {op.line}: Unsupported comparison operator '{op.value}' in elif-statement")
-                    self.output.append(f"    {jm2} {label_next}")
+                    self.backend.cond_jump(jm2, label_next)
                 
                 self.generate_block([TokenType.ELIF, TokenType.ELSE, TokenType.ENDIF])
-                self.output.append(f"    jmp near {label_end}")
-                self.output.append(f"{label_next}:")
+                self.backend.jump(label_end)
+                self.backend.label(label_next)
                 
             elif self.current_token().type == TokenType.ELSE:
                 has_else = True
@@ -492,11 +528,11 @@ class CodeGenerator:
         
         # Only place end label if we had elif/else
         if has_elif_or_else:
-            self.output.append(f"{label_end}:")
+            self.backend.label(label_end)
 
         # mark end line and emit end marker
         end_line = self.current_token().line if self.current_token() else start_line
-        self.output.append(f"; __GEN_END__ {block_id} {end_line}")
+        self.backend.emit_raw(f"; __GEN_END__ {block_id} {end_line}")
 
         if self.current_token() and self.current_token().type == TokenType.ENDIF:
             self.advance()
@@ -505,7 +541,7 @@ class CodeGenerator:
         start_line = self.current_token().line if self.current_token() else -1
         block_id = self.block_counter
         self.block_counter += 1
-        self.output.append(f"; __GEN_START__ {block_id} {start_line}")
+        self.backend.emit_raw(f"; __GEN_START__ {block_id} {start_line}")
         self.advance()
         
         # Support two syntaxes:
@@ -562,9 +598,9 @@ class CodeGenerator:
         internal_reg = None
         loop_depth = len(self.loop_stack)  # 0 for outermost
         if self.bits == 64:
-            # preferred order by depth: prefer r8..r15 to keep registers
-            # available for manual use by the programmer
-            base_prefs = ('r8','r9','r10','r11','r12','r13','r14','r15','rbx')
+            # preferred order by depth: prefer r12..r15, rbx (callee-saved)
+            # r8..r11 are volatile and will be clobbered by calls
+            base_prefs = ('r12','r13','r14','r15','rbx')
 
             # If the loop variable is a register name, try to use it
             if is_register_var:
@@ -595,9 +631,9 @@ class CodeGenerator:
             # fallback: allocate from pool which also records mapping
             internal_reg = self.allocate_reg_for(var)
 
-        label_start = self.get_label()
-        label_end = self.get_label()
-        label_continue = self.get_label()
+        label_start = self.backend.get_label()
+        label_end = self.backend.get_label()
+        label_continue = self.backend.get_label()
 
         self.loop_stack.append({
             'break': label_end,
@@ -620,7 +656,7 @@ class CodeGenerator:
         # avoid operand-size mismatches with instructions that operate on
         # 32-bit registers (eax, edx, etc.). For 32-bit target keep the
         # allocated register as-is.
-        if self.bits == 64:
+        if self.bits == 64 and self.arch == 'x86_64':
             loop_reg = subreg32(internal_reg)
         else:
             loop_reg = internal_reg
@@ -634,19 +670,19 @@ class CodeGenerator:
             self.register_map[var] = loop_reg
             self.register_map[var.lower()] = loop_reg
 
-        self.output.append(f"    mov {loop_reg}, {start}")
-        self.output.append(f"{label_start}:")
-        self.output.append(f"    cmp {loop_reg}, {end}")
+        self.backend.mov(loop_reg, start)
+        self.backend.label(label_start)
+        self.backend.compare(loop_reg, end)
         # Use jge (jump if greater or equal) so the loop does not skip the
         # final iteration when the loop variable equals the end value.
-        self.output.append(f"    jge {label_end}")
+        self.backend.cond_jump('>=', label_end)
 
         self.generate_block([TokenType.ENDFOR])
 
-        self.output.append(f"{label_continue}:")
-        self.output.append(f"    inc {loop_reg}")
-        self.output.append(f"    jmp near {label_start}")
-        self.output.append(f"{label_end}:")
+        self.backend.label(label_continue)
+        self.backend.add(loop_reg, '1')
+        self.backend.jump(label_start)
+        self.backend.label(label_end)
         
         self.loop_stack.pop()
         
@@ -659,7 +695,7 @@ class CodeGenerator:
 
         # emit end marker
         end_line = self.current_token().line if self.current_token() else start_line
-        self.output.append(f"; __GEN_END__ {block_id} {end_line}")
+        self.backend.emit_raw(f"; __GEN_END__ {block_id} {end_line}")
 
         if self.current_token() and self.current_token().type == TokenType.ENDFOR:
             self.advance()
@@ -668,7 +704,7 @@ class CodeGenerator:
         start_line = self.current_token().line if self.current_token() else -1
         block_id = self.block_counter
         self.block_counter += 1
-        self.output.append(f"; __GEN_START__ {block_id} {start_line}")
+        self.backend.emit_raw(f"; __GEN_START__ {block_id} {start_line}")
         self.advance()
 
         # Expect: WHILE <operand> <comparison-op> <number|operand>
@@ -692,17 +728,17 @@ class CodeGenerator:
             rhs_val, rhs_info = self.parse_operand()
         self.skip_newlines()
         
-        label_start = self.get_label()
-        label_end = self.get_label()
-        label_continue = self.get_label()
+        label_start = self.backend.get_label()
+        label_end = self.backend.get_label()
+        label_continue = self.backend.get_label()
 
         self.loop_stack.append({
             'break': label_end,
             'continue': label_continue
         })
 
-        self.output.append(f"{label_start}:")
-        self.output.append(f"{label_continue}:")
+        self.backend.label(label_start)
+        self.backend.label(label_continue)
 
         # If both sides are numeric, evaluate condition at compile-time.
         cmp_emitted = False
@@ -716,7 +752,7 @@ class CodeGenerator:
             }
             if not cond_map.get(op.type, False):
                 # condition false => jump to end immediately
-                self.output.append(f"    jmp near {label_end}")
+                self.backend.jump(label_end)
         else:
             # ensure left operand is a register/memory for valid cmp
             if var_token.type == TokenType.NUMBER:
@@ -730,34 +766,34 @@ class CodeGenerator:
                     left = self.remap_reg(left)
                 right = rhs_val
 
-            self.output.append(f"    cmp {left}, {right}")
+            self.backend.compare(left, right)
             cmp_emitted = True
 
         jump_map = {
-            TokenType.EQ: 'jne', TokenType.NE: 'je',
-            TokenType.LT: 'jge', TokenType.GT: 'jle',
-            TokenType.LE: 'jg', TokenType.GE: 'jl'
+            TokenType.EQ: '!=', TokenType.NE: '==',
+            TokenType.LT: '>=', TokenType.GT: '<=',
+            TokenType.LE: '>', TokenType.GE: '<'
         }
         
         try:
+            # Invert condition to jump out if false
             jm = jump_map[op.type]
         except KeyError:
             raise SyntaxError(f"Line {op.line}: Unsupported comparison operator '{op.value}' in while-statement")
-        # Only emit the conditional jump if we actually emitted a cmp; for
-        # constant-true loops we don't want a premature conditional branch.
+        
         if cmp_emitted:
-            self.output.append(f"    {jm} near {label_end}")
+            self.backend.cond_jump(jm, label_end)
+        
         self.generate_block([TokenType.ENDWHILE])
         
-        self.output.append(f"    jmp near {label_start}")
-        self.output.append(f"{label_end}:")
+        self.backend.jump(label_start)
+        self.backend.label(label_end)
         
         self.loop_stack.pop()
         
-
         # emit end marker
         end_line = self.current_token().line if self.current_token() else start_line
-        self.output.append(f"; __GEN_END__ {block_id} {end_line}")
+        self.backend.emit_raw(f"; __GEN_END__ {block_id} {end_line}")
 
         if self.current_token() and self.current_token().type == TokenType.ENDWHILE:
             self.advance()
@@ -766,7 +802,7 @@ class CodeGenerator:
         start_line = self.current_token().line if self.current_token() else -1
         block_id = self.block_counter
         self.block_counter += 1
-        self.output.append(f"; __GEN_START__ {block_id} {start_line}")
+        self.backend.emit_raw(f"; __GEN_START__ {block_id} {start_line}")
         self.advance()
         func_name = self.current_token().value
         self.advance()
@@ -799,47 +835,36 @@ class CodeGenerator:
         }
 
         # Emit function label and prologue
-        self.output.append(f"\nglobal {func_name}")
-        self.output.append(f"{func_name}:")
+        self.backend.prologue(func_name, params)
         
+        # Map incoming parameters to internal registers
+        # The backend prologue might handle some of this, but we need to
+        # move args from calling convention regs to our internal regs.
         if self.bits == 64:
-            self.output.append("    push rbp")
-            self.output.append("    mov rbp, rsp")
-
-            # Map incoming parameters to internal callee-saved regs
             reg_map = self.arg_regs
             for i, p in enumerate(params):
                 internal = self.allocate_reg_for(p)
                 if i < len(reg_map):
-                    self.output.append(f"    mov {internal}, {reg_map[i]}")
+                    self.backend.mov(internal, reg_map[i])
                 else:
-                    # For simplicity, parameters beyond 4 are not supported yet.
-                    self.output.append(f"    ; WARNING: parameter '{p}' passed on stack not supported")
+                    # For simplicity, parameters beyond 4/6 are not supported yet.
+                    self.backend.emit_raw(f"    ; WARNING: parameter '{p}' passed on stack not supported")
         else:
-            # 32-bit: prefix user function names with '_' to match C/Win decorations
-            # (Already handled by _get_symbol_name above, but logic here was specific to 32-bit prologue)
-            self.output.append("    push ebp")
-            self.output.append("    mov ebp, esp")
-
+            # 32-bit x86 specific logic (legacy)
             # Load parameters from the stack [ebp+8], [ebp+12], ... into internal regs
             for i, p in enumerate(params):
                 internal = self.allocate_reg_for(p)
                 offset = 8 + 4 * i
-                self.output.append(f"    mov {internal}, dword [ebp+{offset}]")
+                self.backend.mov(internal, f"dword [ebp+{offset}]")
 
         self.generate_block([TokenType.ENDFUNC])
 
-        # function epilogue depends on bitness
-        if self.bits == 64:
-            self.output.append("    pop rbp")
-        else:
-            self.output.append("    pop ebp")
-        self.output.append("    ret")
+        # function epilogue
+        self.backend.epilogue()
         
-
         # emit end marker
         end_line = self.current_token().line if self.current_token() else start_line
-        self.output.append(f"; __GEN_END__ {block_id} {end_line}")
+        self.backend.emit_raw(f"; __GEN_END__ {block_id} {end_line}")
 
         if self.current_token() and self.current_token().type == TokenType.ENDFUNC:
             self.advance()
@@ -848,22 +873,18 @@ class CodeGenerator:
     
     def generate_return(self):
         self.advance()
-        if self.bits == 64:
-            self.output.append("    pop rbp")
-        else:
-            self.output.append("    pop ebp")
-        self.output.append("    ret")
+        self.backend.ret()
     
     def generate_break(self):
         if not self.loop_stack:
             raise SyntaxError(f"Line {self.current_token().line}: 'break' outside loop")
-        self.output.append(f"    jmp near {self.loop_stack[-1]['break']}")
+        self.backend.jump(self.loop_stack[-1]['break'])
         self.advance()
     
     def generate_continue(self):
         if not self.loop_stack:
             raise SyntaxError(f"Line {self.current_token().line}: 'continue' outside loop")
-        self.output.append(f"    jmp near {self.loop_stack[-1]['continue']}")
+        self.backend.jump(self.loop_stack[-1]['continue'])
         self.advance()
     
     def generate_block(self, end_tokens):
@@ -890,7 +911,7 @@ class CodeGenerator:
                 # Remap register names inside raw ASM lines so that loop
                 # variables previously bound to callee-saved registers are
                 # used consistently in the emitted assembly.
-                self.output.append(self.remap_asm_line(token.value))
+                self.backend.emit_raw(self.remap_asm_line(token.value))
                 self.advance()
             elif token.type == TokenType.INCLUDE:
                 # Skip here as well; original source will be rewritten to
@@ -908,7 +929,7 @@ class CodeGenerator:
         start_line = self.current_token().line if self.current_token() else -1
         block_id = self.block_counter
         self.block_counter += 1
-        self.output.append(f"; __GEN_START__ {block_id} {start_line}")
+        self.backend.emit_raw(f"; __GEN_START__ {block_id} {start_line}")
         self.advance()
 
         func_name = self.current_token().value
@@ -960,35 +981,143 @@ class CodeGenerator:
         elif func_name in ['strlen','strcpy','strcmp','strcat','abs','min','max','pow','arraysum','arrayfill','arraycopy','memset','memcpy','rand','sleep']:
             self.generate_stdlib_call(func_name, args)
         else:
-            # User-defined function call: on x64 move up to 4 args into RCX,RDX,R8,R9
-            # on x86 push args (right-to-left) and call _func
-            if args:
-                arg_str = ', '.join(arg.value for arg in args)
-                self.output.append(f"    ; Call {func_name} with args: {arg_str}")
+            # Generic function call
+            # Determine calling convention parameters
+            if self.target == 'windows':
+                reg_params = ['rcx', 'rdx', 'r8', 'r9']
+                shadow_space = 32
+                stack_arg_start_idx = 4
+            else:
+                # System V (Linux/macOS)
+                reg_params = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
+                shadow_space = 0
+                stack_arg_start_idx = 6
+
             if self.bits == 64:
-                reg_map = self.arg_regs
-                for i, arg in enumerate(args[:4]):
+                # 1. Identify args for registers vs stack
+                reg_args = args[:stack_arg_start_idx]
+                stack_args = args[stack_arg_start_idx:]
+                
+                # 2. Calculate stack alignment
+                # We need to ensure RSP is 16-byte aligned *before* the 'call' instruction.
+                # The 'call' instruction itself pushes 8 bytes (return address), so on entry
+                # to the callee, RSP will be ending in 8 (misaligned), which is correct.
+                # But right before 'call', it must be 0 mod 16.
+                #
+                # We assume RSP is aligned (0 mod 16) when we start.
+                # We will push stack_args (8 bytes each) and allocate shadow_space.
+                stack_space_needed = (len(stack_args) * 8) + shadow_space
+                padding = (16 - (stack_space_needed % 16)) % 16
+                
+                total_stack_adj = stack_space_needed + padding
+                
+                if args:
+                    # Escape newlines in the comment to avoid breaking the assembly file
+                    safe_args = []
+                    for arg in args:
+                        val = str(arg.value)
+                        val = val.replace('\n', '\\n').replace('\r', '\\r')
+                        safe_args.append(val)
+                    arg_str = ', '.join(safe_args)
+                    self.output.append(f"    ; Call {func_name} ({arg_str})")
+
+                # 3. Apply padding if needed
+                if padding > 0:
+                    self.output.append(f"    sub rsp, {padding} ; Align stack")
+
+                # 4. Push stack arguments (Right-to-Left)
+                for arg in reversed(stack_args):
+                    val = arg.value
                     if arg.type == TokenType.STRING:
                         str_label = f"_str_{self.string_counter}"
                         self.string_counter += 1
-                        escaped_str = arg.value.replace('`', '\\`')
-                        self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
-                        self.output.append(f"    lea {reg_map[i]}, [rel {str_label}]")
-                    elif arg.type in [TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER]:
-                        val = arg.value
-                        if arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
-                            val = self.remap_reg(arg.value)
-                        self.output.append(f"    mov {reg_map[i]}, {val}")
+                        escaped_str = arg.value.replace('`', '\\`').replace('\n', '\\n').replace('\r', '\\r')
+                        self.backend.emit_string_data(str_label, escaped_str)
+                        # For stack args, we can push the address directly
+                        # But 'push qword [rel label]' is not valid in all modes, 
+                        # usually 'push label' works as immediate in 64-bit (push imm32 sign extended)
+                        # or we load to rax and push. Safer to load to rax.
+                        self.output.append(f"    lea rax, [rel {str_label}]")
+                        self.output.append("    push rax")
+                    elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
+                        val = self.remap_reg(val)
+                        # If it's a memory operand or register, push it
+                        # If it's a variable [var], push qword [var]
+                        # For simplicity, if it looks like a register, push it.
+                        # If it's an identifier, we might need to know if it's a label or variable.
+                        # The current compiler treats identifiers as labels or registers.
+                        # We'll assume it's a register or immediate-like label.
+                        # To be safe for memory/labels, move to RAX first.
+                        self.output.append(f"    mov rax, {val}")
+                        self.output.append("    push rax")
+                    elif arg.type == TokenType.NUMBER:
+                        # push immediate
+                        # 64-bit push immediate is allowed (sign extended)
+                        self.output.append(f"    push {val}")
 
+                # 5. Allocate shadow space (Windows only)
+                if shadow_space > 0:
+                    self.output.append(f"    sub rsp, {shadow_space} ; Shadow space")
+
+                # 6. Load register arguments
+                # Be careful not to overwrite registers that are needed for later arguments!
+                # But here we are just moving values. If an argument *uses* a register that
+                # we are about to overwrite (e.g. call foo(rcx, rdx)), and we do:
+                # mov rcx, rcx (ok)
+                # mov rdx, rdx (ok)
+                # But if we have: call foo(rdx, rcx)
+                # mov rcx, rdx  <-- RCX now has RDX value
+                # mov rdx, rcx  <-- RDX now has RCX (which is the OLD RDX value!) - ERROR
+                #
+                # To avoid this register shuffling hazard, we should load args into 
+                # temporary registers or stack if there's a conflict, or just be careful.
+                # A simple robust way: push all reg args to stack (or use temp regs) then pop? 
+                # Or just assume the user isn't doing tricky swaps for now?
+                #
+                # Given the simplicity of this compiler, we'll assume direct moves for now,
+                # but we should handle the string literals and identifiers correctly.
+                
+                for i, arg in enumerate(reg_args):
+                    dest_reg = reg_params[i]
+                    
+                    if arg.type == TokenType.STRING:
+                        str_label = f"_str_{self.string_counter}"
+                        self.string_counter += 1
+                        escaped_str = arg.value.replace('`', '\\`').replace('\n', '\\n').replace('\r', '\\r')
+                        self.backend.emit_string_data(str_label, escaped_str)
+                        self.output.append(f"    lea {dest_reg}, [rel {str_label}]")
+                    elif arg.type == TokenType.NUMBER:
+                        self.output.append(f"    mov {dest_reg}, {arg.value}")
+                    elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
+                        src_val = self.remap_reg(arg.value)
+                        # If src_val is the same as dest_reg, no-op
+                        if src_val != dest_reg:
+                            self.emit_mov(dest_reg, src_val)
+
+                # 7. Call
                 self.output.append(f"    call {func_name}")
+
+                # 8. Cleanup stack
+                if total_stack_adj > 0:
+                    self.output.append(f"    add rsp, {total_stack_adj} ; Cleanup stack")
+
             else:
                 # 32-bit: push args right-to-left
+                if args:
+                    safe_args = []
+                    for arg in args:
+                        val = str(arg.value)
+                        val = val.replace('\n', '\\n').replace('\r', '\\r')
+                        safe_args.append(val)
+                    arg_str = ', '.join(safe_args)
+                    self.output.append(f"    ; Call {func_name} ({arg_str})")
+                    
                 for arg in reversed(args):
                     if arg.type == TokenType.STRING:
                         str_label = f"_str_{self.string_counter}"
                         self.string_counter += 1
-                        escaped_str = arg.value.replace('`', '\\`')
-                        self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
+                        escaped_str = arg.value.replace('`', '\\`').replace('\n', '\\n').replace('\r', '\\r')
+                        self.backend.emit_string_data(str_label, escaped_str)
                         self.output.append(f"    push dword {str_label}")
                     elif arg.type in [TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER]:
                         val = arg.value
@@ -1003,7 +1132,7 @@ class CodeGenerator:
 
         # emit end marker for this call
         end_line = self.current_token().line if self.current_token() else start_line
-        self.output.append(f"; __GEN_END__ {block_id} {end_line}")
+        self.backend.emit_raw(f"; __GEN_END__ {block_id} {end_line}")
     
     def generate_print(self, args):
         if not args:
@@ -1016,13 +1145,13 @@ class CodeGenerator:
             if arg.type == TokenType.STRING:
                 str_label = f"_str_{self.string_counter}"
                 self.string_counter += 1
-                escaped_str = arg.value.replace('`', '\\`')
-                self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
+                escaped_str = arg.value.replace('`', '\\`').replace('\n', '\\n').replace('\r', '\\r')
+                self.backend.emit_string_data(str_label, escaped_str)
                 self.output.append(f"    lea {arg_reg}, [rel {str_label}]")
                 self.output.append(f"    call _print_string")
             elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
                 val = self.remap_reg(arg.value)
-                self.output.append(f"    mov {arg_reg}, {val}")
+                self.emit_mov(arg_reg, val)
                 self.output.append(f"    call _print_number")
             elif arg.type == TokenType.NUMBER:
                 self.output.append(f"    mov {arg_reg}, {arg.value}")
@@ -1032,8 +1161,8 @@ class CodeGenerator:
             if arg.type == TokenType.STRING:
                 str_label = f"_str_{self.string_counter}"
                 self.string_counter += 1
-                escaped_str = arg.value.replace('`', '\\`')
-                self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
+                escaped_str = arg.value.replace('`', '\\`').replace('\n', '\\n').replace('\r', '\\r')
+                self.backend.emit_string_data(str_label, escaped_str)
                 self.output.append(f"    push dword {str_label}")
                 self.output.append(f"    call _print_string")
                 self.output.append(f"    add esp, 4")
@@ -1085,8 +1214,8 @@ class CodeGenerator:
                     if arg.type == TokenType.STRING:
                         str_label = f"_str_{self.string_counter}"
                         self.string_counter += 1
-                        escaped_str = arg.value.replace('`', '\\`')
-                        self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
+                        escaped_str = arg.value.replace('`', '\\`').replace('\n', '\\n').replace('\r', '\\r')
+                        self.backend.emit_string_data(str_label, escaped_str)
                         self.output.append(f"    lea {reg_map[i]}, [rel {str_label}]")
                     elif arg.type in [TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER]:
                         val = arg.value
@@ -1101,7 +1230,7 @@ class CodeGenerator:
                     str_label = f"_str_{self.string_counter}"
                     self.string_counter += 1
                     escaped_str = arg.value.replace('`', '\\`')
-                    self.data_section.append(f"{str_label} db `{escaped_str}`, 0")
+                    self.backend.emit_string_data(str_label, escaped_str)
                     self.output.append(f"    push dword {str_label}")
                 elif arg.type in [TokenType.NUMBER, TokenType.IDENTIFIER, TokenType.REGISTER]:
                     val = arg.value

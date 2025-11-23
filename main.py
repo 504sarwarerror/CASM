@@ -27,7 +27,8 @@ def main():
         config['input_file'],
         config['output_file'],
         config['verbose'],
-        target=config.get('target', 'windows')
+        target=config.get('target', 'windows'),
+        arch=config.get('arch', 'x86_64')
     )
     
     if not compiler.compile():
@@ -43,7 +44,8 @@ def main():
             config['verbose'],
             target=config.get('target', 'windows'),
             linker_flags=config.get('ldflags', ''),
-            debug=config.get('debug', False)
+            debug=config.get('debug', False),
+            arch=config.get('arch', 'x86_64')
         )
         
         if not builder.assemble_and_link():
