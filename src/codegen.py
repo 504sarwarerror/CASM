@@ -160,10 +160,37 @@ class CodeGenerator:
         # Support case-insensitive lookup for register mappings. The lexer
         # may emit registers in different cases; prefer an exact match but
         # fall back to a lowercase key if present.
+        
+        # First, translate x86 registers to ARM64 if targeting ARM64
+        if self.arch == 'arm64':
+            name = self.translate_x86_reg_name(name)
+        
         if name in self.register_map:
             return self.register_map[name]
         lower = name.lower()
         return self.register_map.get(lower, name)
+    
+    def translate_x86_reg_name(self, reg_name):
+        """Translate x86 register names to ARM64 equivalents."""
+        x86_to_arm64 = {
+            'rax': 'x0', 'eax': 'w0', 'ax': 'w0', 'al': 'w0',
+            'rbx': 'x1', 'ebx': 'w1', 'bx': 'w1', 'bl': 'w1',
+            'rcx': 'x2', 'ecx': 'w2', 'cx': 'w2', 'cl': 'w2',
+            'rdx': 'x3', 'edx': 'w3', 'dx': 'w3', 'dl': 'w3',
+            'rsi': 'x4', 'esi': 'w4', 'si': 'w4',
+            'rdi': 'x5', 'edi': 'w5', 'di': 'w5',
+            'rbp': 'x29', 'ebp': 'w29', 'bp': 'w29',
+            'rsp': 'sp', 'esp': 'sp',
+            'r8': 'x8', 'r8d': 'w8',
+            'r9': 'x9', 'r9d': 'w9',
+            'r10': 'x10', 'r10d': 'w10',
+            'r11': 'x11', 'r11d': 'w11',
+            'r12': 'x12', 'r12d': 'w12',
+            'r13': 'x13', 'r13d': 'w13',
+            'r14': 'x14', 'r14d': 'w14',
+            'r15': 'x15', 'r15d': 'w15',
+        }
+        return x86_to_arm64.get(reg_name.lower(), reg_name)
 
     def allocate_reg_for(self, orig_name):
         # lazy-init appropriate register pool for 32/64-bit modes
@@ -230,6 +257,101 @@ class CodeGenerator:
         # Replace identifiers (words) only. This is conservative but works for
         # typical assembly tokens like 'eax', 'ebx', 'r12', 'ecx', etc.
         return re.sub(r"\b[A-Za-z][A-Za-z0-9]*\b", repl, line)
+
+    def translate_x86_to_arm64(self, line: str) -> str:
+        """Translate x86 assembly instructions to ARM64 equivalents."""
+        import re
+        
+        line = line.strip()
+        if not line or line.startswith(';') or line.startswith('#'):
+            return line
+        
+        # Register mapping from x86 to ARM64
+        x86_to_arm64_regs = {
+            'rax': 'x0', 'eax': 'w0', 'ax': 'w0', 'al': 'w0',
+            'rbx': 'x1', 'ebx': 'w1', 'bx': 'w1', 'bl': 'w1',
+            'rcx': 'x2', 'ecx': 'w2', 'cx': 'w2', 'cl': 'w2',
+            'rdx': 'x3', 'edx': 'w3', 'dx': 'w3', 'dl': 'w3',
+            'rsi': 'x4', 'esi': 'w4', 'si': 'w4',
+            'rdi': 'x5', 'edi': 'w5', 'di': 'w5',
+            'rbp': 'x29', 'ebp': 'w29', 'bp': 'w29',
+            'rsp': 'sp', 'esp': 'sp',
+            'r8': 'x8', 'r8d': 'w8',
+            'r9': 'x9', 'r9d': 'w9',
+            'r10': 'x10', 'r10d': 'w10',
+            'r11': 'x11', 'r11d': 'w11',
+            'r12': 'x12', 'r12d': 'w12',
+            'r13': 'x13', 'r13d': 'w13',
+            'r14': 'x14', 'r14d': 'w14',
+            'r15': 'x15', 'r15d': 'w15',
+        }
+        
+        # Parse instruction
+        parts = re.split(r'\s+', line, 1)
+        if len(parts) < 2:
+            return line
+        
+        instr = parts[0].lower()
+        operands = parts[1] if len(parts) > 1 else ""
+        
+        # Translate common instructions
+        if instr == 'mov':
+            # Parse mov dest, src
+            ops = [op.strip() for op in operands.split(',')]
+            if len(ops) == 2:
+                dest = ops[0].lower()
+                src = ops[1]
+                
+                # Translate registers
+                dest_arm = x86_to_arm64_regs.get(dest, dest)
+                
+                # Check if source is immediate or register
+                if src.isdigit() or (src.startswith('-') and src[1:].isdigit()):
+                    return f"    mov {dest_arm}, #{src}"
+                else:
+                    src_lower = src.lower()
+                    src_arm = x86_to_arm64_regs.get(src_lower, src)
+                    return f"    mov {dest_arm}, {src_arm}"
+        
+        elif instr == 'add':
+            ops = [op.strip() for op in operands.split(',')]
+            if len(ops) == 2:
+                dest = ops[0].lower()
+                src = ops[1]
+                dest_arm = x86_to_arm64_regs.get(dest, dest)
+                if src.isdigit():
+                    return f"    add {dest_arm}, {dest_arm}, #{src}"
+                else:
+                    src_arm = x86_to_arm64_regs.get(src.lower(), src)
+                    return f"    add {dest_arm}, {dest_arm}, {src_arm}"
+        
+        elif instr == 'sub':
+            ops = [op.strip() for op in operands.split(',')]
+            if len(ops) == 2:
+                dest = ops[0].lower()
+                src = ops[1]
+                dest_arm = x86_to_arm64_regs.get(dest, dest)
+                if src.isdigit():
+                    return f"    sub {dest_arm}, {dest_arm}, #{src}"
+                else:
+                    src_arm = x86_to_arm64_regs.get(src.lower(), src)
+                    return f"    sub {dest_arm}, {dest_arm}, {src_arm}"
+        
+        elif instr in ['push', 'pop']:
+            # ARM64 doesn't have push/pop, use str/ldr with pre/post-index
+            ops = operands.strip().lower()
+            reg_arm = x86_to_arm64_regs.get(ops, ops)
+            if instr == 'push':
+                return f"    str {reg_arm}, [sp, #-16]!"
+            else:  # pop
+                return f"    ldr {reg_arm}, [sp], #16"
+        
+        elif instr == 'ret':
+            return "    ret"
+        
+        # If no translation found, return original
+        return line
+
 
     def parse_operand(self):
         """Parse an operand which may be:
@@ -921,7 +1043,11 @@ class CodeGenerator:
                 # Remap register names inside raw ASM lines so that loop
                 # variables previously bound to callee-saved registers are
                 # used consistently in the emitted assembly.
-                self.backend.emit_raw(self.remap_asm_line(token.value))
+                line = self.remap_asm_line(token.value)
+                # If targeting ARM64, translate x86 instructions to ARM64
+                if self.arch == 'arm64':
+                    line = self.translate_x86_to_arm64(line)
+                self.backend.emit_raw(line)
                 self.advance()
             elif token.type == TokenType.INCLUDE:
                 # Skip here as well; original source will be rewritten to
