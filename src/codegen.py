@@ -173,23 +173,29 @@ class CodeGenerator:
     def translate_x86_reg_name(self, reg_name):
         """Translate x86 register names to ARM64 equivalents."""
         x86_to_arm64 = {
+            # Volatile registers
             'rax': 'x0', 'eax': 'w0', 'ax': 'w0', 'al': 'w0',
-            'rbx': 'x1', 'ebx': 'w1', 'bx': 'w1', 'bl': 'w1',
-            'rcx': 'x2', 'ecx': 'w2', 'cx': 'w2', 'cl': 'w2',
-            'rdx': 'x3', 'edx': 'w3', 'dx': 'w3', 'dl': 'w3',
-            'rsi': 'x4', 'esi': 'w4', 'si': 'w4',
-            'rdi': 'x5', 'edi': 'w5', 'di': 'w5',
+            'rcx': 'x1', 'ecx': 'w1', 'cx': 'w1', 'cl': 'w1',
+            'rdx': 'x2', 'edx': 'w2', 'dx': 'w2', 'dl': 'w2',
+            'rsi': 'x3', 'esi': 'w3', 'si': 'w3',
+            'rdi': 'x4', 'edi': 'w4', 'di': 'w4',
+            'r8': 'x5', 'r8d': 'w5',
+            'r9': 'x6', 'r9d': 'w6',
+            'r10': 'x7', 'r10d': 'w7',
+            'r11': 'x8', 'r11d': 'w8',
+            
+            # Callee-saved registers
+            'rbx': 'x19', 'ebx': 'w19', 'bx': 'w19', 'bl': 'w19',
+            'r12': 'x20', 'r12d': 'w20',
+            'r13': 'x21', 'r13d': 'w21',
+            'r14': 'x22', 'r14d': 'w22',
+            'r15': 'x23', 'r15d': 'w23',
+            
+            # Special registers
             'rbp': 'x29', 'ebp': 'w29', 'bp': 'w29',
             'rsp': 'sp', 'esp': 'sp',
-            'r8': 'x8', 'r8d': 'w8',
-            'r9': 'x9', 'r9d': 'w9',
-            'r10': 'x10', 'r10d': 'w10',
-            'r11': 'x11', 'r11d': 'w11',
-            'r12': 'x12', 'r12d': 'w12',
-            'r13': 'x13', 'r13d': 'w13',
-            'r14': 'x14', 'r14d': 'w14',
-            'r15': 'x15', 'r15d': 'w15',
         }
+
         return x86_to_arm64.get(reg_name.lower(), reg_name)
 
     def allocate_reg_for(self, orig_name):
@@ -336,6 +342,47 @@ class CodeGenerator:
                 else:
                     src_arm = x86_to_arm64_regs.get(src.lower(), src)
                     return f"    sub {dest_arm}, {dest_arm}, {src_arm}"
+        
+        elif instr == 'mul':
+            # x86: mul src (multiplies rax by src, result in rax:rdx)
+            # ARM64: mul dest, src1, src2
+            ops = operands.strip().lower()
+            src_arm = x86_to_arm64_regs.get(ops, ops)
+            # Simplified: mul x0, x0, src (assumes rax is x0)
+            return f"    mul x0, x0, {src_arm}"
+        
+        elif instr == 'div':
+            # x86: div src (divides rdx:rax by src, quotient in rax, remainder in rdx)
+            # ARM64: udiv dest, dividend, divisor
+            ops = operands.strip().lower()
+            src_arm = x86_to_arm64_regs.get(ops, ops)
+            # Simplified: udiv x0, x0, src
+            return f"    udiv x0, x0, {src_arm}"
+        
+        elif instr == 'xor':
+            # x86: xor dest, src
+            # ARM64: eor dest, src1, src2
+            ops = [op.strip() for op in operands.split(',')]
+            if len(ops) == 2:
+                dest = ops[0].lower()
+                src = ops[1].lower()
+                dest_arm = x86_to_arm64_regs.get(dest, dest)
+                src_arm = x86_to_arm64_regs.get(src, src)
+                return f"    eor {dest_arm}, {dest_arm}, {src_arm}"
+        
+        elif instr == 'cmp':
+            # x86: cmp dest, src
+            # ARM64: cmp reg, operand (same syntax mostly)
+            ops = [op.strip() for op in operands.split(',')]
+            if len(ops) == 2:
+                dest = ops[0].lower()
+                src = ops[1]
+                dest_arm = x86_to_arm64_regs.get(dest, dest)
+                if src.isdigit():
+                    return f"    cmp {dest_arm}, #{src}"
+                else:
+                    src_arm = x86_to_arm64_regs.get(src.lower(), src)
+                    return f"    cmp {dest_arm}, {src_arm}"
         
         elif instr in ['push', 'pop']:
             # ARM64 doesn't have push/pop, use str/ldr with pre/post-index
@@ -732,14 +779,19 @@ class CodeGenerator:
         if self.bits == 64:
             # preferred order by depth: prefer r12..r15, rbx (callee-saved)
             # r8..r11 are volatile and will be clobbered by calls
-            base_prefs = ('r12','r13','r14','r15','rbx')
+            if self.arch == 'arm64':
+                base_prefs = ('x19', 'x20', 'x21', 'x22', 'x23')
+            else:
+                base_prefs = ('r12','r13','r14','r15','rbx')
 
             # If the loop variable is a register name, try to use it
             if is_register_var:
                 desired = var.lower()
-                # normalize names like 'r12d' -> 'r12'
+                # normalize names like 'r12d' -> 'r12' or 'w12' -> 'x12'
                 if desired.endswith('d') and desired.startswith('r'):
                     desired = desired[:-1]
+                elif desired.startswith('w') and self.arch == 'arm64':
+                    desired = 'x' + desired[1:]
                 # if desired is available in the register pool and not used,
                 # reserve it
                 if desired in base_prefs and desired not in self.register_map.values():
@@ -807,7 +859,7 @@ class CodeGenerator:
         self.backend.compare(loop_reg, end)
         # Use jge (jump if greater or equal) so the loop does not skip the
         # final iteration when the loop variable equals the end value.
-        self.backend.cond_jump('>=', label_end)
+        self.backend.cond_jump('>', label_end)
 
         self.generate_block([TokenType.ENDFOR])
 
