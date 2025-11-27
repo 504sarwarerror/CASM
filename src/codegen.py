@@ -1130,10 +1130,28 @@ class CodeGenerator:
             # consume '('
             self.advance()
             while self.current_token() and self.current_token().type != TokenType.RPAREN:
-                if self.current_token().type in [TokenType.STRING, TokenType.IDENTIFIER, TokenType.NUMBER, TokenType.REGISTER]:
-                    args.append(self.current_token())
+                tok = self.current_token()
+                if tok.type == TokenType.STRING:
+                    # String literals are handled as-is
+                    args.append(tok)
                     self.advance()
-                elif self.current_token().type == TokenType.COMMA:
+                elif tok.type in [TokenType.IDENTIFIER, TokenType.NUMBER, TokenType.REGISTER, TokenType.LBRACKET]:
+                    # Use parse_operand to handle memory operands like [bufferSize]
+                    operand_str, operand_tok = self.parse_operand()
+                    if operand_str and operand_tok:
+                        # Create a pseudo-token with the parsed operand string
+                        # We need to preserve the token type for later processing
+                        if operand_str.startswith('['):
+                            # Memory operand - treat as IDENTIFIER with the full [..] syntax
+                            pseudo_tok = Token(TokenType.IDENTIFIER, operand_str, operand_tok.line)
+                        elif operand_tok.type == TokenType.NUMBER:
+                            pseudo_tok = Token(TokenType.NUMBER, operand_str, operand_tok.line)
+                        elif operand_tok.type == TokenType.REGISTER:
+                            pseudo_tok = Token(TokenType.REGISTER, operand_str, operand_tok.line)
+                        else:
+                            pseudo_tok = Token(TokenType.IDENTIFIER, operand_str, operand_tok.line)
+                        args.append(pseudo_tok)
+                elif tok.type == TokenType.COMMA:
                     self.advance()
                 else:
                     self.advance()
@@ -1236,72 +1254,8 @@ class CodeGenerator:
                 
                 total_stack_adj = stack_space_needed + padding
                 
-                if args:
-                    # Escape newlines in the comment to avoid breaking the assembly file
-                    safe_args = []
-                    for arg in args:
-                        val = str(arg.value)
-                        val = val.replace('\n', '\\n').replace('\r', '\\r')
-                        safe_args.append(val)
-                    arg_str = ', '.join(safe_args)
-                    self.output.append(f"    ; Call {func_name} ({arg_str})")
-
-                # 3. Apply padding if needed
-                if padding > 0:
-                    self.output.append(f"    sub rsp, {padding} ; Align stack")
-
-                # 4. Push stack arguments (Right-to-Left)
-                for arg in reversed(stack_args):
-                    val = arg.value
-                    if arg.type == TokenType.STRING:
-                        str_label = f"_str_{self.string_counter}"
-                        self.string_counter += 1
-                        escaped_str = arg.value.replace('`', '\\`').replace('\n', '\\n').replace('\r', '\\r')
-                        self.backend.emit_string_data(str_label, escaped_str)
-                        # For stack args, we can push the address directly
-                        # But 'push qword [rel label]' is not valid in all modes, 
-                        # usually 'push label' works as immediate in 64-bit (push imm32 sign extended)
-                        # or we load to rax and push. Safer to load to rax.
-                        self.backend.load_address("rax", str_label)
-                        self.backend.emit_raw("    push rax")
-                    elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
-                        val = self.remap_reg(val)
-                        # If it's a memory operand or register, push it
-                        # If it's a variable [var], push qword [var]
-                        # For simplicity, if it looks like a register, push it.
-                        # If it's an identifier, we might need to know if it's a label or variable.
-                        # The current compiler treats identifiers as labels or registers.
-                        # We'll assume it's a register or immediate-like label.
-                        # To be safe for memory/labels, move to RAX first.
-                        self.output.append(f"    mov rax, {val}")
-                        self.output.append("    push rax")
-                    elif arg.type == TokenType.NUMBER:
-                        # push immediate
-                        # 64-bit push immediate is allowed (sign extended)
-                        self.output.append(f"    push {val}")
-
-                # 5. Allocate shadow space (Windows only)
-                if shadow_space > 0:
-                    self.output.append(f"    sub rsp, {shadow_space} ; Shadow space")
-
-                # 6. Load register arguments
-                # Be careful not to overwrite registers that are needed for later arguments!
-                # But here we are just moving values. If an argument *uses* a register that
-                # we are about to overwrite (e.g. call foo(rcx, rdx)), and we do:
-                # mov rcx, rcx (ok)
-                # mov rdx, rdx (ok)
-                # But if we have: call foo(rdx, rcx)
-                # mov rcx, rdx  <-- RCX now has RDX value
-                # mov rdx, rcx  <-- RDX now has RCX (which is the OLD RDX value!) - ERROR
-                #
-                # To avoid this register shuffling hazard, we should load args into 
-                # temporary registers or stack if there's a conflict, or just be careful.
-                # A simple robust way: push all reg args to stack (or use temp regs) then pop? 
-                # Or just assume the user isn't doing tricky swaps for now?
-                #
-                # Given the simplicity of this compiler, we'll assume direct moves for now,
-                # but we should handle the string literals and identifiers correctly.
-                
+                # Load register arguments
+                # Handle different argument types: strings, numbers, identifiers, and memory operands
                 for i, arg in enumerate(reg_args):
                     dest_reg = reg_params[i]
                     
@@ -1315,16 +1269,36 @@ class CodeGenerator:
                         self.output.append(f"    mov {dest_reg}, {arg.value}")
                     elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
                         src_val = self.remap_reg(arg.value)
-                        # If src_val is the same as dest_reg, no-op
-                        if src_val != dest_reg:
-                            self.emit_mov(dest_reg, src_val)
+                        # Check if this is a memory operand (starts with '[')
+                        # Memory operands need to be dereferenced with mov, not lea
+                        if src_val.startswith('['):
+                            # Memory operand: use mov to dereference
+                            # Use the operand as-is without adding size prefix
+                            self.output.append(f"    mov {dest_reg}, {src_val}")
+                        else:
+                            # Regular identifier or register
+                            if src_val != dest_reg:
+                                self.emit_mov(dest_reg, src_val)
 
-                # 7. Call
+                # Push stack arguments (Right-to-Left) if any
+                for arg in reversed(stack_args):
+                    val = arg.value
+                    if arg.type == TokenType.STRING:
+                        str_label = f"_str_{self.string_counter}"
+                        self.string_counter += 1
+                        escaped_str = arg.value.replace('`', '\\`').replace('\n', '\\n').replace('\r', '\\r')
+                        self.backend.emit_string_data(str_label, escaped_str)
+                        self.backend.load_address("rax", str_label)
+                        self.backend.emit_raw("    push rax")
+                    elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
+                        val = self.remap_reg(val)
+                        self.output.append(f"    mov rax, {val}")
+                        self.output.append("    push rax")
+                    elif arg.type == TokenType.NUMBER:
+                        self.output.append(f"    push {val}")
+
+                # Call the function
                 self.backend.call_function(func_name)
-
-                # 8. Cleanup stack
-                if total_stack_adj > 0:
-                    self.output.append(f"    add rsp, {total_stack_adj} ; Cleanup stack")
 
             else:
                 # 32-bit: push args right-to-left
