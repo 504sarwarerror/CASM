@@ -45,6 +45,7 @@ class TokenType(Enum):
     MODULO = 37
     REGISTER = 38
     IDENTIFIER = 39
+    ASTERISK = 41
 
 
 @dataclass

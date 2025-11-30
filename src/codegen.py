@@ -1126,14 +1126,23 @@ class CodeGenerator:
         args = []
 
         # Support two call syntaxes: call foo a, b  OR call foo(a, b)
+        # Also support lean syntax with * prefix: call foo(*[addr], value)
         if self.current_token() and self.current_token().type == TokenType.LPAREN:
             # consume '('
             self.advance()
             while self.current_token() and self.current_token().type != TokenType.RPAREN:
                 tok = self.current_token()
+                use_lea = False
+                
+                # Check for * prefix (lean syntax for lea)
+                if tok.type == TokenType.ASTERISK:
+                    use_lea = True
+                    self.advance()
+                    tok = self.current_token()
+                
                 if tok.type == TokenType.STRING:
                     # String literals are handled as-is
-                    args.append(tok)
+                    args.append((tok, use_lea))
                     self.advance()
                 elif tok.type in [TokenType.IDENTIFIER, TokenType.NUMBER, TokenType.REGISTER, TokenType.LBRACKET]:
                     # Use parse_operand to handle memory operands like [bufferSize]
@@ -1150,7 +1159,7 @@ class CodeGenerator:
                             pseudo_tok = Token(TokenType.REGISTER, operand_str, operand_tok.line)
                         else:
                             pseudo_tok = Token(TokenType.IDENTIFIER, operand_str, operand_tok.line)
-                        args.append(pseudo_tok)
+                        args.append((pseudo_tok, use_lea))
                 elif tok.type == TokenType.COMMA:
                     self.advance()
                 else:
@@ -1160,7 +1169,7 @@ class CodeGenerator:
                 self.advance()
         else:
             while self.current_token() and self.current_token().type in [TokenType.STRING, TokenType.IDENTIFIER, TokenType.NUMBER, TokenType.REGISTER]:
-                args.append(self.current_token())
+                args.append((self.current_token(), False))
                 self.advance()
                 if self.current_token() and self.current_token().type == TokenType.COMMA:
                     self.advance()
@@ -1196,15 +1205,16 @@ class CodeGenerator:
                 self.backend.emit_raw("    add x29, sp, #16")
                 
                 # First arg is format string (in x0)
-                if args[0].type == TokenType.STRING:
+                first_arg, _ = args[0]
+                if first_arg.type == TokenType.STRING:
                     str_label = f"_str_{self.string_counter}"
                     self.string_counter += 1
-                    escaped_str = args[0].value.replace('`', '\\`').replace('\\n', '\\\\n').replace('\\r', '\\\\r')
+                    escaped_str = first_arg.value.replace('`', '\\`').replace('\\n', '\\\\n').replace('\\r', '\\\\r')
                     self.backend.emit_string_data(str_label, escaped_str)
                     self.backend.load_address("x0", str_label)
                 
                 # Remaining args go on the stack
-                for i, arg in enumerate(args[1:]):
+                for i, (arg, use_lea) in enumerate(args[1:]):
                     if arg.type == TokenType.NUMBER:
                         self.backend.emit_raw(f"    mov x8, #{arg.value}")
                         self.backend.emit_raw(f"    str x8, [sp, #{i * 8}]")
@@ -1248,15 +1258,26 @@ class CodeGenerator:
                 # But right before 'call', it must be 0 mod 16.
                 #
                 # We assume RSP is aligned (0 mod 16) when we start.
-                # We will push stack_args (8 bytes each) and allocate shadow_space.
+                # We will allocate space for stack_args (8 bytes each) AND shadow_space.
+                # Shadow space is always 32 bytes on Windows x64.
                 stack_space_needed = (len(stack_args) * 8) + shadow_space
-                padding = (16 - (stack_space_needed % 16)) % 16
+                
+                # Align total allocation to 16 bytes
+                if stack_space_needed % 16 != 0:
+                    padding = 16 - (stack_space_needed % 16)
+                else:
+                    padding = 0
                 
                 total_stack_adj = stack_space_needed + padding
                 
+                # Reserve stack space once
+                if total_stack_adj > 0:
+                    self.backend.emit_raw(f"    sub rsp, {total_stack_adj}")
+                
                 # Load register arguments
                 # Handle different argument types: strings, numbers, identifiers, and memory operands
-                for i, arg in enumerate(reg_args):
+                # Each arg is now a tuple (token, use_lea)
+                for i, (arg, use_lea) in enumerate(reg_args):
                     dest_reg = reg_params[i]
                     
                     if arg.type == TokenType.STRING:
@@ -1269,49 +1290,77 @@ class CodeGenerator:
                         self.output.append(f"    mov {dest_reg}, {arg.value}")
                     elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
                         src_val = self.remap_reg(arg.value)
-                        # Check if this is a memory operand (starts with '[')
-                        # Memory operands need to be dereferenced with mov, not lea
-                        if src_val.startswith('['):
-                            # Memory operand: use mov to dereference
-                            # Use the operand as-is without adding size prefix
-                            self.output.append(f"    mov {dest_reg}, {src_val}")
+                        
+                        # Check if we should use lea (lean syntax with * prefix)
+                        if use_lea:
+                            # Use lea to load the effective address
+                            self.backend.load_effective_address(dest_reg, src_val)
                         else:
-                            # Regular identifier or register
-                            if src_val != dest_reg:
-                                self.emit_mov(dest_reg, src_val)
+                            # Check if this is a memory operand (starts with '[')
+                            # Memory operands need to be dereferenced with mov, not lea
+                            if src_val.startswith('['):
+                                # Memory operand: use mov to dereference
+                                # Use the operand as-is without adding size prefix
+                                self.output.append(f"    mov {dest_reg}, {src_val}")
+                            else:
+                                # Regular identifier or register
+                                if src_val != dest_reg:
+                                    self.emit_mov(dest_reg, src_val)
 
-                # Push stack arguments (Right-to-Left) if any
-                for arg in reversed(stack_args):
+                # Place stack arguments at fixed offsets relative to RSP
+                # Shadow space is at [rsp+0]..[rsp+31]
+                # First stack arg is at [rsp+32], second at [rsp+40], etc.
+                for i, (arg, use_lea) in enumerate(stack_args):
+                    offset = shadow_space + (i * 8)
                     val = arg.value
+                    
+                    # We can't mov mem, mem so if arg is memory/global, use rax as temp
+                    # We can't mov mem, imm64 (for large constants), but small ones are ok.
+                    # Safest is to move to rax first then to stack.
+                    
                     if arg.type == TokenType.STRING:
                         str_label = f"_str_{self.string_counter}"
                         self.string_counter += 1
                         escaped_str = arg.value.replace('`', '\\`').replace('\n', '\\n').replace('\r', '\\r')
                         self.backend.emit_string_data(str_label, escaped_str)
                         self.backend.load_address("rax", str_label)
-                        self.backend.emit_raw("    push rax")
+                        self.output.append(f"    mov qword [rsp + {offset}], rax")
+                        
                     elif arg.type in [TokenType.REGISTER, TokenType.IDENTIFIER]:
                         val = self.remap_reg(val)
-                        self.output.append(f"    mov rax, {val}")
-                        self.output.append("    push rax")
+                        if val.startswith('['):
+                             # Memory to memory -> use rax
+                             self.output.append(f"    mov rax, {val}")
+                             self.output.append(f"    mov qword [rsp + {offset}], rax")
+                        else:
+                             # Register to memory -> direct mov ok
+                             self.output.append(f"    mov qword [rsp + {offset}], {val}")
+                             
                     elif arg.type == TokenType.NUMBER:
-                        self.output.append(f"    push {val}")
+                        # Immediate to memory -> dword/qword specifier needed
+                        # For safety with large numbers, use rax
+                        self.output.append(f"    mov rax, {val}")
+                        self.output.append(f"    mov qword [rsp + {offset}], rax")
 
                 # Call the function
                 self.backend.call_function(func_name)
+                
+                # Restore stack pointer
+                if total_stack_adj > 0:
+                    self.backend.emit_raw(f"    add rsp, {total_stack_adj}")
 
             else:
                 # 32-bit: push args right-to-left
                 if args:
                     safe_args = []
-                    for arg in args:
+                    for arg, use_lea in args:
                         val = str(arg.value)
                         val = val.replace('\n', '\\n').replace('\r', '\\r')
                         safe_args.append(val)
                     arg_str = ', '.join(safe_args)
                     self.output.append(f"    ; Call {func_name} ({arg_str})")
                     
-                for arg in reversed(args):
+                for arg, use_lea in reversed(args):
                     if arg.type == TokenType.STRING:
                         str_label = f"_str_{self.string_counter}"
                         self.string_counter += 1
@@ -1337,7 +1386,8 @@ class CodeGenerator:
         if not args:
             return
         
-        arg = args[0]
+        # Unpack tuple (arg, use_lea) - use_lea is ignored for print
+        arg, _ = args[0]
         
         if self.bits == 64:
             arg_reg = self.arg_regs[0]
@@ -1378,8 +1428,14 @@ class CodeGenerator:
     def generate_scan(self, args):
         if not args:
             return
-        buffer = args[0].value
-        buffer_size = args[1].value if len(args) > 1 else "256"
+        # Unpack tuples
+        buffer, _ = args[0]
+        buffer = buffer.value
+        if len(args) > 1:
+            buffer_size_arg, _ = args[1]
+            buffer_size = buffer_size_arg.value
+        else:
+            buffer_size = "256"
         if self.bits == 64:
             self.output.append(f"    lea {self.arg_regs[0]}, [rel {buffer}]")
             self.output.append(f"    mov {self.arg_regs[1]}, {buffer_size}")
@@ -1394,7 +1450,9 @@ class CodeGenerator:
     def generate_scanint(self, args):
         if not args:
             return
-        var = args[0].value
+        # Unpack tuple
+        var_arg, _ = args[0]
+        var = var_arg.value
         if self.bits == 64:
             self.output.append(f"    lea {self.arg_regs[0]}, [rel {var}]")
             self.output.append(f"    call _scanint")
@@ -1408,7 +1466,8 @@ class CodeGenerator:
         if self.bits == 64:
             # Map arguments to registers
             reg_map = self.arg_regs
-            for i, arg in enumerate(args[:4]):
+            # Unpack tuples (arg, use_lea)
+            for i, (arg, use_lea) in enumerate(args[:4]):
                 if i < len(reg_map):
                     if arg.type == TokenType.STRING:
                         str_label = f"_str_{self.string_counter}"
@@ -1424,7 +1483,7 @@ class CodeGenerator:
             self.output.append(f"    call _{func_name}")
         else:
             # 32-bit: push args right-to-left and call underscore-prefixed name
-            for arg in reversed(args):
+            for arg, use_lea in reversed(args):
                 if arg.type == TokenType.STRING:
                     str_label = f"_str_{self.string_counter}"
                     self.string_counter += 1

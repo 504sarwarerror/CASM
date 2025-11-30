@@ -193,6 +193,15 @@ class X86Backend(Backend):
         """Load effective address (LEA) for x86-64"""
         self.output.append(f"    lea {dest_reg}, [rel {label}]")
     
+    def load_effective_address(self, dest_reg, operand):
+        """Load effective address from an operand (memory or identifier)"""
+        # If operand is already a memory reference like [rsp + 512], use it directly
+        if operand.startswith('['):
+            self.output.append(f"    lea {dest_reg}, {operand}")
+        else:
+            # If it's an identifier, wrap it in brackets
+            self.output.append(f"    lea {dest_reg}, [{operand}]")
+    
     def call_function(self, name):
         """Call a function (x86-64)"""
         self.output.append(f"    call {name}")
@@ -304,6 +313,21 @@ class ARM64Backend(Backend):
         # ARM64 uses page-relative addressing
         self.output.append(f"    adrp {dest_reg}, {label}@PAGE")
         self.output.append(f"    add {dest_reg}, {dest_reg}, {label}@PAGEOFF")
+    
+    def load_effective_address(self, dest_reg, operand):
+        """Load effective address from an operand (memory or identifier)"""
+        # For ARM64, if operand is a memory reference, calculate the address
+        if operand.startswith('['):
+            # Extract the address calculation from brackets
+            # For now, emit a comment and use adr for simple cases
+            self.output.append(f"    ; LEA equivalent for {operand}")
+            # This is a simplified implementation - full support would need
+            # proper parsing of the memory operand
+            self.output.append(f"    adr {dest_reg}, {operand}")
+        else:
+            # Use adrp + add for identifiers
+            self.output.append(f"    adrp {dest_reg}, {operand}@PAGE")
+            self.output.append(f"    add {dest_reg}, {dest_reg}, {operand}@PAGEOFF")
     
     def call_function(self, name):
         """Call a function (ARM64) - macOS requires underscore prefix"""

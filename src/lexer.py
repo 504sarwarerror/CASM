@@ -191,7 +191,7 @@ class Lexer:
                 '(': TokenType.LPAREN, ')': TokenType.RPAREN,
                 '[': TokenType.LBRACKET, ']': TokenType.RBRACKET,
                 '+': TokenType.PLUS, '-': TokenType.MINUS,
-                '*': TokenType.MULTIPLY, '/': TokenType.DIVIDE,
+                '*': TokenType.ASTERISK, '/': TokenType.DIVIDE,
                 '%': TokenType.MODULO
             }
             
