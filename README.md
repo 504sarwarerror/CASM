@@ -154,7 +154,6 @@ section .text
 ├── libs/
 │   └── stdio.py          # Standard library
 ├── examples/             # Example programs
-├── test_all_features.asm # Comprehensive test suite
 └── main.py              # Entry point
 ```
 
