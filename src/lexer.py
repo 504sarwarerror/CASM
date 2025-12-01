@@ -103,8 +103,9 @@ class Lexer:
             if line[i] == ';':
                 break
             
-            # String literals
-            if line[i] == '"':
+            # String literals (support both double and single quotes)
+            if line[i] in ('"', "'"):
+                quote_char = line[i]
                 j = i + 1
                 escaped = False
                 while j < len(line):
@@ -116,7 +117,7 @@ class Lexer:
                         escaped = True
                         j += 1
                         continue
-                    if line[j] == '"':
+                    if line[j] == quote_char:
                         break
                     j += 1
                 
@@ -124,6 +125,7 @@ class Lexer:
                     string_val = line[i+1:j]
                     string_val = string_val.replace('\\n', '\n').replace('\\t', '\t')
                     string_val = string_val.replace('\\r', '\r').replace('\\"', '"')
+                    string_val = string_val.replace("\\'", "'")
                     string_val = string_val.replace('\\\\', '\\')
                     self.tokens.append(Token(TokenType.STRING, string_val, line_num, i))
                     i = j + 1
